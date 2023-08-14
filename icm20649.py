@@ -187,7 +187,7 @@ class dict2obj:
 # Data Classes
 ###################################################################
 
-class iCMSystemData(object):
+class icmSystemData(object):
     '''System relevant performance data'''
     def __init__(self,  
                  data_rate: int = 0, fusion_rate:    int = 0, 
@@ -197,7 +197,7 @@ class iCMSystemData(object):
         self.zmq_rate        = zmq_rate
         self.reporting_rate  = reporting_rate
 
-class icIMUData(object):
+class icmIMUData(object):
     '''IMU Data from the sensor'''
     def __init__(self, 
                  time: float=0.0,
