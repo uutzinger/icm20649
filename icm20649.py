@@ -2,24 +2,30 @@
 
 ################################################################
 # ICM 20649 IMU
+#
+# Urs Utzinger, Summer 2023
 ################################################################
 
 # IMPORTS
 #########################################u#######################
-import asyncio
+import math
+import board
 import logging
 import argparse
 import signal
-import math
 import time
-import numpy as np
+import asyncio
 import os
-from   copy import copy
-import msgpack
 import pathlib
+import zmq
+import zmq.asyncio
+
+import numpy as np
+import msgpack
 import json
 
-import board
+from   copy import copy
+
 from adafruit_icm20x import ICM20649, AccelRange, GyroRange, AccelDLPFFreq, GyroDLPFFreq
 
 from pyIMU.madgwick import Madgwick
@@ -27,18 +33,21 @@ from pyIMU.quaternion import Vector3D, Quaternion
 from pyIMU.utilities import q2rpy, rpymag2h
 from pyIMU.motion import Motion
 
-import zmq
-import zmq.asyncio
 
 if os.name != 'nt':
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     import subprocess
-    
+
+# CONSTANTS
+################################################################
+
 RAD2DEG = 180.0 / math.pi
 DEG2RAD = math.pi / 180.0
 TWOPI   = 2.0*math.pi
 
+# COMMUNICATION
+################################################################
 ZMQPORT  = 5556
 
 # LOCATION
@@ -131,32 +140,35 @@ def saveCalibration(filename, center, correctionMat):
         json.dump(d, file)
 
 def detectMotion(acc: float, gyr: float, acc_avg: float, gyr_avg:float) -> bool:
-        # Three Stage Motion Detection
-        # Original Code is from FreeIMU Processing example
-        # Some modifications and tuning
-        #
-        # 0. Acceleration Activity
-        # 1. Change in Acceleration
-        # 2. Gyration Activity
-        # 2. Change in Gyration
+    # 4 Stage Motion Detection
+    #
+    # 1. Acceleration Activity
+    # 2. Change in Acceleration
+    # 3. Gyration Activity
+    # 4. Change in Gyration
+    #
+    # Original Code is from FreeIMU Processing example
+    # Some modifications and tuning
 
-        # ACCELEROMETER
-        # Absolute value
-        acc_test       = abs(acc) > FUZZY_ACCEL_ZERO_MAX and abs(acc) < FUZZY_ACCEL_ZERO_MIN
-        # Sudden changes
-        acc_delta_test = abs(acc_avg - acc) > FUZZY_DELTA_ACCEL_ZERO
+    # ACCELEROMETER
+    # -------------
+    # Absolute value
+    acc_test       = abs(acc) > FUZZY_ACCEL_ZERO_MAX and abs(acc) < FUZZY_ACCEL_ZERO_MIN
+    # Sudden changes
+    acc_delta_test = abs(acc_avg - acc) > FUZZY_DELTA_ACCEL_ZERO
 
-        # GYROSCOPE
-        # Absolute value
-        gyr_test       = abs(gyr)           > FUZZY_GYRO_ZERO
-        # Sudden changes
-        gyr_delta_test = abs(gyr_avg - gyr) > FUZZY_DELTA_GYRO_ZERO
+    # GYROSCOPE
+    # ---------
+    # Absolute value
+    gyr_test       = abs(gyr)           > FUZZY_GYRO_ZERO
+    # Sudden changes
+    gyr_delta_test = abs(gyr_avg - gyr) > FUZZY_DELTA_GYRO_ZERO
 
-        # DEBUG for fine tuning
-        # print(abs(acc), abs(acc_avg-acc), abs(gyr), abs(gyr_avg-gyr), acc_test, acc_delta_test, gyr_test, gyr_delta_test)
+    # DEBUG for fine tuning
+    # print(abs(acc), abs(acc_avg-acc), abs(gyr), abs(gyr_avg-gyr), acc_test, acc_delta_test, gyr_test, gyr_delta_test)
 
-        # Combine acceleration test, acceleration deviation test and gyro test
-        return (acc_test or acc_delta_test or gyr_test or gyr_delta_test)
+    # Combine acceleration test, acceleration deviation test and gyro test
+    return (acc_test or acc_delta_test or gyr_test or gyr_delta_test)
 
 
 def obj2dict(obj):
@@ -251,7 +263,7 @@ class icmMotionData(object):
 
 #########################################################################################################
 # ZMQ Data Receiver for ICM 20x
-# Primarily useful for 3rd party client
+# Primarily useful for 3rd party clients to communcate with this program
 #########################################################################################################
 
 class zmqWorkerICM():
@@ -263,8 +275,6 @@ class zmqWorkerICM():
         self.finished  =  asyncio.Event()
 
         self.logger     = logger
-        self.finish_up  = False
-        self.paused     = False
         self.zmqPort    = zmqPort
 
         self.new_system = False
@@ -284,8 +294,8 @@ class zmqWorkerICM():
         self.new_fusion = False
         self.new_motion = False
 
-        context = zmq.Context()
-        poller  = zmq.Poller()
+        context = zmq.asyncio.Context()
+        poller  = zmq.asyncio.Poller()
         
         self.data_system = None
         self.data_imu    = None
@@ -304,9 +314,9 @@ class zmqWorkerICM():
 
         while not stop_event.is_set():
             try:
-                events = dict(poller.poll(timeout=self.zmqTimeout))
+                events = dict(await poller.poll(timeout=self.zmqTimeout))
                 if socket in events and events[socket] == zmq.POLLIN:
-                    response = socket.recv_multipart()
+                    response = await socket.recv_multipart()
                     if len(response) == 2:
                         [topic, msg_packed] = response
                         if topic == b"system":
@@ -381,9 +391,6 @@ class zmqWorkerICM():
     def set_zmqPort(self, port):
         self.zmqPort = port
 
-    def pause(self):
-        self.paused = not self.paused
-
 #########################################################################################################
 # ICM 20649
 #########################################################################################################
@@ -393,13 +400,12 @@ class icm20x:
     def __init__(self, logger=None,
                   args=None) -> None:
 
-        # super(icm20x, self).__init__()
-
-        self.args                               = args
+        self.args                       = args
 
         # Signals
         self.processedDataAvailable     = asyncio.Event()
         self.terminate                  = asyncio.Event()
+
         # These Signals are easier to deal with without Event
         self.connected                  = False
         self.sensorStarted              = False
@@ -572,6 +578,7 @@ class icm20x:
         Currently uses pyIMU MadgwickAHRS, in future might be upgraded to imufusion & https://pypi.org/project/imufusion/
         '''
 
+        # Time interval monitoring. We need accurate time measurements to compute pose and motion
         dt = self.sensorTime - self.previous_fusionTime # time interval between sensor data
         self.previous_fusionTime = copy(self.sensorTime) # keep track of last sensor time
 
@@ -630,7 +637,7 @@ class icm20x:
     # Sensor Loop
     ##############################################################################################
 
-    async def update_data(self):
+    async def update_data(self,stop_event: asyncio.Event):
         '''
         Check if Data available
         Obtain data from sensor
@@ -638,7 +645,7 @@ class icm20x:
         Update Motion
         '''
 
-        while not self.finish_up:
+        while not stop_event.is_set():
 
             startTime = time.perf_counter()
 
@@ -664,6 +671,7 @@ class icm20x:
                 # if True:
                 if self.icm.dataReady:
 
+                    # Record how often dataReady had to wait for new data
                     self.i2cHits = copy(self.i2cCounts)
                     self.i2cCounts = 0
 
@@ -733,7 +741,7 @@ class icm20x:
             await asyncio.sleep(0) # allow other tasks to run
 
     ##############################################################################################
-    # gearVRC Tasks
+    # icm Tasks
     ##############################################################################################
 
     async def update_gyrOffset(self):
@@ -755,7 +763,7 @@ class icm20x:
         self.logger.log(logging.INFO, 'Gyroscope Bias Saving Task stopped')
 
 
-    async def update_report(self):
+    async def update_report(self, stop_event: asyncio.Event):
         '''
         Report latest data
         Report fused data
@@ -770,7 +778,7 @@ class icm20x:
         await self.processedDataAvailable.wait()
         # no clear needed as we just wait for system to start
 
-        while not self.finish_up:
+        while not stop_event.is_set():
 
             startTime = time.perf_counter()
 
@@ -839,14 +847,14 @@ class icm20x:
             self.report_deltaTime = time.perf_counter() - startTime
 
             # Wait to next interval time
-            sleepTime = self.report_updateInterval - (time.perf_counter() - startTime)
+            sleepTime = self.report_updateInterval - (self.report_deltaTime)
             await asyncio.sleep(max(0.,sleepTime))
             timingError = time.perf_counter() - startTime - self.report_updateInterval
             self.report_updateInterval = max(0., REPORTINTERVAL - timingError)
 
         self.logger.log(logging.INFO, 'Reporting stopped')
 
-    async def update_zmq(self):
+    async def update_zmq(self, stop_event: asyncio.Event):
         '''
         Report data on ZMQ socket
         There are 4 data packets presented:
@@ -870,7 +878,7 @@ class icm20x:
         self.zmq_lastTimeRate   = time.perf_counter()
         self.zmq_updateCounts   = 0
 
-        while not self.finish_up:
+        while not stop_event.is_set():
 
             startTime = time.perf_counter()
 
@@ -933,31 +941,32 @@ class icm20x:
 
         self.logger.log(logging.INFO, 'ZMQ stopped')
 
-    async def handle_termination(self, tasks:None):
+    async def handle_termination(self, stop_events, tasks):
         '''
         Cancel slow tasks based on provided list (speed up closing for program)
         '''
         self.logger.log(logging.INFO, 'Control-C or Kill signal detected')
-        self.finish_up = True
-        if tasks is not None: # This will terminate tasks faster
+        if tasks is not None:
             self.logger.log(logging.INFO, 'Cancelling all Tasks...')
+            for stop_event in stop_events:
+                stop_event.set()
             await asyncio.sleep(1) # give some time for tasks to finish up
             for task in tasks:
                 if task is not None:
                     task.cancel()
 
-    async def update_terminator(self, tasks):
+    async def update_terminator(self, stop_event: asyncio.Event, tasks, stop_events):
         '''
         Wrapper for Task Termination
         Waits for termination signal and then executes the termination sequence
         '''
         self.logger.log(logging.INFO, 'Starting Terminator...')
 
-        while not self.finish_up:
+        while not stop_event.is_set():
 
             await self.terminate.wait()
             self.terminate.clear()
-            await self.handle_termination(tasks=tasks)
+            await self.handle_termination(stop_events=stop_events, tasks=tasks)
 
         self.logger.log(logging.INFO, 'Terminator completed')
 
@@ -966,6 +975,10 @@ class icm20x:
 ##############################################################################################
 
 async def main(args: argparse.Namespace):
+
+    stop_event  = asyncio.Event()
+    stop_event.clear()
+    stop_events = [stop_event]
 
     # Setup logging
     logger = logging.getLogger(__name__)
@@ -976,25 +989,25 @@ async def main(args: argparse.Namespace):
 
     # Create all the async tasks
     # They will run until stop signal is created, stop signal is indicated with event
-    imu_task = asyncio.create_task(imu.update_data())
+    imu_task = asyncio.create_task(imu.update_data(stop_event=stop_event))
 
     tasks = [imu_task]    # frequently used tasks
     terminator_tasks = [] # slow tasks, long wait times
 
     if args.fusion:
-        gyroffset_task  = asyncio.create_task(imu.update_gyrOffset())
+        gyroffset_task  = asyncio.create_task(imu.update_gyrOffset(stop_event=stop_event))
         tasks.append(gyroffset_task)
         terminator_tasks.append(gyroffset_task)
 
     if args.report > 0:
-        reporting_task  = asyncio.create_task(imu.update_report())   # report new data, will not terminate
+        reporting_task  = asyncio.create_task(imu.update_report(stop_event=stop_event))   # report new data, will not terminate
         tasks.append(reporting_task)
 
     if args.zmqport is not None:
-        zmq_task     = asyncio.create_task(imu.update_zmq())         # update zmq, will not terminate
+        zmq_task     = asyncio.create_task(imu.update_zmq(stop_event=stop_event))         # update zmq, will not terminate
         tasks.append(zmq_task)
-
-    terminator_task = asyncio.create_task(imu.update_terminator(terminator_tasks)) # make sure we shutdown in timely fashion
+    
+    terminator_task = asyncio.create_task(imu.update_terminator(stop_event=stop_event, tasks=terminator_tasks, stop_events=stop_events)) # make sure we shutdown in timely fashion
     tasks.append(terminator_task)
 
     # Set up a Control-C handler to gracefully stop the program
@@ -1002,8 +1015,8 @@ async def main(args: argparse.Namespace):
     if os.name == 'posix':
         # Get the main event loop
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT,  lambda: asyncio.create_task(imu.handle_termination(tasks=tasks)) ) # control-c
-        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(imu.handle_termination(tasks=tasks)) ) # kill
+        loop.add_signal_handler(signal.SIGINT,  lambda: asyncio.create_task(imu.handle_termination(tasks=tasks, stop_events=stop_events)) ) # control-c
+        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(imu.handle_termination(tasks=tasks, stop_events=stop_events)) ) # kill
 
     # Wait until all tasks are completed, which is when user wants to terminate the program
     await asyncio.wait(tasks, timeout=float('inf'))
