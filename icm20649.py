@@ -268,7 +268,7 @@ class icmMotionData(object):
 
 class zmqWorkerICM():
 
-    def __init__(self, logger, zmqportPUB='tcp://localhost:5556', zmqportREP='tcp://localhost:5555', parent=None):
+    def __init__(self, logger, zmqportPUB='tcp://localhost:5556', parent=None):
         super(zmqWorkerICM, self).__init__(parent)
 
         self.dataReady =  asyncio.Event()
@@ -276,7 +276,6 @@ class zmqWorkerICM():
 
         self.logger     = logger
         self.zmqportPUB = zmqportPUB
-        self.zmqportREP = zmqportREP
 
         self.new_system = False
         self.new_imu    = False
@@ -661,6 +660,12 @@ class icm20x:
 
             if self.sensorIsBooting:
                 self.sensorRunInCounts += 1
+                # Read sensor and discard data
+                if self.icm.dataReady:
+                    _ = self.icm.acceleration
+                    _ = self.icm.gyro
+                    if self.mag_available: _ = self.icm.magnetic
+                # Run in finished ?
                 if self.sensorRunInCounts > 50:
                     self.sensorIsBooting = False
                     self.sensorRunInCounts = 0
@@ -762,7 +767,7 @@ class icm20x:
 
             if self.gyr_offset_updated:
                 my_file = pathlib.Path(self.current_directory + '/Gyr.json')
-                saveCalibration(my_file, self.gyr_offset, self.gyr_crosscorr)
+                saveCalibration(my_file, self.gyr_offset.v, self.gyr_crosscorr)
                 self.gyr_offset_updated = False
 
             await asyncio.sleep(60.0)
@@ -798,21 +803,20 @@ class icm20x:
             # Display the Data
             msg_out = '\033[2J\n'
             msg_out+= '-------------------------------------------------\n'
-            if self.report > 0:
-                msg_out+= 'icm 20x: Moving:{}, Mag:{}\n'.format(
-                                                    'Y' if self.moving else 'N',
-                                                    'Y' if self.magok  else 'N')
+            msg_out+= 'icm 20x: Moving:{}, Mag:{}\n'.format(
+                                                'Y' if self.moving else 'N',
+                                                'Y' if self.magok  else 'N')
             msg_out+= '-------------------------------------------------\n'
+            msg_out+= 'Data    {:>10.6f}, {:>3d}/s\n'.format(self.data_deltaTime*1000.,        self.data_rate)
+            msg_out+= 'i2c polls until data {:d}\n'.format(self.i2cHits)
+            msg_out+= 'Report  {:>10.6f}, {:>3d}/s\n'.format(self.report_deltaTime*1000.,      self.report_rate)
 
-            if self.report > 0:
-                msg_out+= 'Data    {:>10.6f}, {:>3d}/s\n'.format(self.data_deltaTime*1000.,        self.data_rate)
-                msg_out+= 'i2c polls until data {:d}\n'.format(self.i2cHits)
-                msg_out+= 'Report  {:>10.6f}, {:>3d}/s\n'.format(self.report_deltaTime*1000.,      self.report_rate)
-                if self.args.fusion:
-                    msg_out+= 'Fusion  {:>10.6f}, {:>3d}/s\n'.format(self.fusion_deltaTime*1000.,  self.fusion_rate)
-                if self.zmqportPUB is not None:
-                    msg_out+= 'ZMQ     {:>10.6f}, {:>3d}/s\n'.format(self.zmqPUB_deltaTime*1000.,  self.zmqPUB_rate)
-                msg_out+= '-------------------------------------------------\n'
+            if self.fusion:
+                msg_out+= 'Fusion  {:>10.6f}, {:>3d}/s\n'.format(self.fusion_deltaTime*1000.,  self.fusion_rate)
+
+            if self.zmqportPUB is not None:
+                msg_out+= 'ZMQ     {:>10.6f}, {:>3d}/s\n'.format(self.zmqPUB_deltaTime*1000.,  self.zmqPUB_rate)
+            msg_out+= '-------------------------------------------------\n'
 
             if self.report > 1:
                 msg_out+= 'Time  {:>10.6f}, dt {:>10.6f}\n'.format(self.sensorTime, self.delta_sensorTime)
