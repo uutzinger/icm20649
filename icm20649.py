@@ -48,7 +48,8 @@ TWOPI   = 2.0*math.pi
 
 # COMMUNICATION
 ################################################################
-ZMQPORT  = 5556
+ZMQPORTPUSHPULL  = 5556
+ZMQPORTREQREP    = 5555
 
 # LOCATION
 ################################################################
@@ -268,14 +269,14 @@ class icmMotionData(object):
 
 class zmqWorkerICM():
 
-    def __init__(self, logger, zmqPort='tcp://localhost:5556', parent=None):
+    def __init__(self, logger, zmqportPUSHPULL='tcp://localhost:5556', parent=None):
         super(zmqWorkerICM, self).__init__(parent)
 
         self.dataReady =  asyncio.Event()
         self.finished  =  asyncio.Event()
 
         self.logger     = logger
-        self.zmqPort    = zmqPort
+        self.zmqportPUSHPULL    = zmqportPUSHPULL
 
         self.new_system = False
         self.new_imu    = False
@@ -307,10 +308,10 @@ class zmqWorkerICM():
         socket.setsockopt(zmq.SUBSCRIBE, b"imu")
         socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
         socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-        socket.connect(self.zmqPort)
+        socket.connect(self.zmqportPUSHPULL)
         poller.register(socket, zmq.POLLIN)
 
-        self.logger.log(logging.INFO, 'IC20x  zmqWorker started on {}'.format(self.zmqPort))
+        self.logger.log(logging.INFO, 'IC20x  zmqWorker started on {}'.format(self.zmqportPUSHPULL))
 
         while not stop_event.is_set():
             try:
@@ -349,7 +350,7 @@ class zmqWorkerICM():
                     socket.setsockopt(zmq.SUBSCRIBE, b"imu")
                     socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
                     socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-                    socket.connect(self.zmqPort)
+                    socket.connect(self.zmqportPUSHPULL)
                     poller.register(socket, zmq.POLLIN)
                     self.new_system = \
                     self.new_imu    = \
@@ -376,7 +377,7 @@ class zmqWorkerICM():
                 socket.setsockopt(zmq.SUBSCRIBE, b"imu")
                 socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
                 socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-                socket.connect(self.zmqPort)
+                socket.connect(self.zmqportPUSHPULL)
                 poller.register(socket, zmq.POLLIN)
                 self.new_system = \
                 self.new_imu    = \
@@ -388,8 +389,8 @@ class zmqWorkerICM():
         context.term()
         self.finished.set()
 
-    def set_zmqPort(self, port):
-        self.zmqPort = port
+    def set_zmqportPUSHPULL(self, port):
+        self.zmqportPUSHPULL = port
 
 #########################################################################################################
 # ICM 20649
@@ -402,6 +403,11 @@ class icm20x:
 
         self.args                       = args
 
+        # Shared States
+        self.fusion                     = args.fusion
+        self.motion                     = args.motion
+        self.report                     = args.report
+        
         # Signals
         self.processedDataAvailable     = asyncio.Event()
         self.terminate                  = asyncio.Event()
@@ -701,7 +707,7 @@ class icm20x:
 
                     # Fusion
                     ###############################################################
-                    if self.args.fusion:
+                    if self.fusion:
                         # update interval
                         start_fusionUpdate = time.perf_counter()
                         # fps
@@ -716,7 +722,7 @@ class icm20x:
 
                     # Motion
                     ###############################################################
-                    if self.args.motion:
+                    if self.motion:
                         # update interval
                         start_motionUpdate = time.perf_counter()
                         # fps
@@ -791,25 +797,25 @@ class icm20x:
             # Display the Data
             msg_out = '\033[2J\n'
             msg_out+= '-------------------------------------------------\n'
-            if self.args.report > 0:
+            if self.report > 0:
                 msg_out+= 'icm 20x: Moving:{}, Mag:{}\n'.format(
                                                     'Y' if self.moving else 'N',
                                                     'Y' if self.magok  else 'N')
 
             msg_out+= '-------------------------------------------------\n'
 
-            if self.args.report > 0:
+            if self.report > 0:
                 msg_out+= 'Data    {:>10.6f}, {:>3d}/s\n'.format(self.data_deltaTime*1000.,        self.data_rate)
                 msg_out+= 'i2c polls until data {:d}\n'.format(self.i2cHits)
                 msg_out+= 'Report  {:>10.6f}, {:>3d}/s\n'.format(self.report_deltaTime*1000.,      self.report_rate)
                 if self.args.fusion:
                     msg_out+= 'Fusion  {:>10.6f}, {:>3d}/s\n'.format(self.fusion_deltaTime*1000.,  self.fusion_rate)
-                if self.args.zmqport is not None:
+                if self.args.zmqportPUSHPULL is not None:
                     msg_out+= 'ZMQ     {:>10.6f}, {:>3d}/s\n'.format(self.zmq_deltaTime*1000.,     self.zmq_rate)
 
                 msg_out+= '-------------------------------------------------\n'
 
-            if self.args.report > 1:
+            if self.report > 1:
                 msg_out+= 'Time  {:>10.6f}, dt {:>10.6f}\n'.format(self.sensorTime, self.delta_sensorTime)
 
                 msg_out+= 'Accel     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc.x,self.acc.y,self.acc.z,self.acc.norm)
@@ -821,7 +827,7 @@ class icm20x:
 
                 msg_out+= '-------------------------------------------------\n'
 
-                if self.args.fusion:
+                if self.fusion:
 
                     msg_out+= 'Acc     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc_cal.x,self.acc_cal.y,self.acc_cal.z,self.acc_cal.norm)
                     msg_out+= 'Gyr     {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_cal.x,self.gyr_cal.y,self.gyr_cal.z,self.gyr_cal.norm*60./TWOPI)
@@ -832,7 +838,7 @@ class icm20x:
                     msg_out+= 'Q:     W{:>6.3f} X{:>6.3f} Y{:>6.3f} Z{:>6.3f}\n'.format(
                                                     self.q.w, self.q.x, self.q.y, self.q.z)
 
-                if self.args.motion:
+                if self.motion:
                     msg_out+= '-------------------------------------------------\n'
 
                     msg_out+= 'Residual {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.residuals.x,self.residuals.y,self.residuals.z,self.residuals.norm)
@@ -854,7 +860,7 @@ class icm20x:
 
         self.logger.log(logging.INFO, 'Reporting stopped')
 
-    async def update_zmq(self, stop_event: asyncio.Event):
+    async def update_zmqPUB(self, stop_event: asyncio.Event):
         '''
         Report data on ZMQ socket
         There are 4 data packets presented:
@@ -864,19 +870,19 @@ class icm20x:
          - motion if enabled
         '''
 
-        self.logger.log(logging.INFO, 'Creating ZMQ Publisher at \'tcp://*:{}\' ...'.format(self.args.zmqport))
+        self.logger.log(logging.INFO, 'Creating ZMQ Publisher at \'tcp://*:{}\' ...'.format(self.args.zmqportPUSHPULL))
 
         context = zmq.asyncio.Context()
         socket = context.socket(zmq.PUB)
-        socket.bind("tcp://*:{}".format(self.args.zmqport))
+        socket.bind("tcp://*:{}".format(self.args.zmqportPUSHPULL))
 
         data_system  = icmSystemData()
         data_imu     = icmIMUData()
         data_fusion  = icmFusionData()
         data_motion  = icmMotionData()
 
-        self.zmq_lastTimeRate   = time.perf_counter()
-        self.zmq_updateCounts   = 0
+        self.zmqPUB_lastTimeRate   = time.perf_counter()
+        self.zmqPUB_updateCounts   = 0
 
         while not stop_event.is_set():
 
@@ -886,11 +892,11 @@ class icm20x:
             self.processedDataAvailable.clear()
 
             # fps
-            self.zmq_updateCounts += 1
-            if (startTime - self.zmq_lastTimeRate)>= 1.:
-                self.zmq_rate = copy(self.zmq_updateCounts)
-                self.zmq_lastTimeRate = copy(startTime)
-                self.zmq_updateCounts = 0
+            self.zmqPUB_updateCounts += 1
+            if (startTime - self.zmqPUB_lastTimeRate)>= 1.:
+                self.zmqPUB_rate = copy(self.zmqPUB_updateCounts)
+                self.zmqPUB_lastTimeRate = copy(startTime)
+                self.zmqPUB_updateCounts = 0
 
             # format the imu data
             data_imu.time   = self.sensorTime
@@ -910,7 +916,7 @@ class icm20x:
             system_msgpack = msgpack.packb(obj2dict(vars(data_system)))
             socket.send_multipart([b"system", system_msgpack])
 
-            if self.args.fusion:
+            if self.fusion:
 
                 # report fusion data
                 data_fusion.time = self.sensorTime
@@ -923,7 +929,7 @@ class icm20x:
                 fusion_msgpack   = msgpack.packb(obj2dict(vars(data_fusion)))
                 socket.send_multipart([b"fusion", fusion_msgpack])
 
-            if self.args.motion:
+            if self.motion:
                 data_motion.time      = self.sensorTime
                 data_motion.accBias   = self.accBias
                 data_motion.velocityBias = self.velocityBias
@@ -935,7 +941,82 @@ class icm20x:
                 socket.send_multipart([b"motion", motion_msgpack])
 
             # update interval
-            self.zmq_deltaTime = time.perf_counter() - startTime
+            self.zmqPUB_deltaTime = time.perf_counter() - startTime
+
+            await asyncio.sleep(0)
+
+        self.logger.log(logging.INFO, 'ZMQ stopped')
+
+    async def update_zmqREP(self, stop_event: asyncio.Event):
+        '''
+        Handle program control
+        - fusion
+        - motion
+        - report
+        - stop
+        '''
+
+        self.logger.log(logging.INFO, 'Creating ZMQ Reply at \'tcp://*:{}\' ...'.format(self.args.zmqportREQREP))
+
+        context = zmq.asyncio.Context()
+        socket  = context.socket(zmq.REQ)
+        socket.bind("tcp://*:{}".format(self.args.zmqportREQREP))
+
+        poller = zmq.asyncio.Poller()
+        poller.register(socket, zmq.POLLIN)
+
+        self.zmqREP_lastTimeRate   = time.perf_counter()
+        self.zmqREP_updateCounts   = 0
+
+        while not stop_event.is_set():
+
+            startTime = time.perf_counter()
+
+            # fps
+            self.zmqREP_updateCounts += 1
+            if (startTime - self.zmqREP_lastTimeRate)>= 1.:
+                self.zmqREP_rate = copy(self.zmqREP_updateCounts)
+                self.zmqREP_lastTimeRate = copy(startTime)
+                self.zmqREP_updateCounts = 0
+
+            events = dict(await poller.poll(timeout=-1))
+            if socket in events and events[socket] == zmq.POLLIN:
+                response = await socket.recv_multipart()
+                if len(response) == 2:
+                    [topic, msg] = response
+                    if topic == b"motion":
+                        if msg == b"True":
+                            self.motion = True
+                            self.fusion = True
+                        else:
+                            self.motion = False
+                            self.fusion = False
+                        socket.send_string("OK")
+                    elif topic == b"fusion":
+                        if msg == b"True":
+                            self.fusion = True
+                        else:
+                            self.fusion = False
+                        socket.send_string("OK")
+                    elif topic == b"report":
+                        msg_str = msg.decode("utf-8")  # Convert bytes to string
+                        self.report = int(msg_str)
+                        socket.send_string("OK")
+                    elif topic == b"stop":
+                        if msg == b"True":
+                            self.terminate.set()
+                        else:
+                            self.terminate.clear()
+                        socket.send_string("OK")
+                    else:
+                        socket.send_string("UNKNOWN")
+                else:
+                    self.logger.log(
+                        logging.ERROR, 'ICM zmqWorker malformed message')
+                    socket.send_string("ERROR")
+
+            # update interval
+            self.zmqREP_deltaTime = time.perf_counter() - startTime
 
             await asyncio.sleep(0)
 
@@ -1003,8 +1084,8 @@ async def main(args: argparse.Namespace):
         reporting_task  = asyncio.create_task(imu.update_report(stop_event=stop_event))   # report new data, will not terminate
         tasks.append(reporting_task)
 
-    if args.zmqport is not None:
-        zmq_task     = asyncio.create_task(imu.update_zmq(stop_event=stop_event))         # update zmq, will not terminate
+    if args.zmqportPUSHPULL is not None:
+        zmq_task     = asyncio.create_task(imu.update_zmqPUB(stop_event=stop_event))         # update zmq, will not terminate
         tasks.append(zmq_task)
     
     terminator_task = asyncio.create_task(imu.update_terminator(stop_event=stop_event, tasks=terminator_tasks, stop_events=stop_events)) # make sure we shutdown in timely fashion
@@ -1064,12 +1145,22 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '-z',
-        '--zmq',
-        dest = 'zmqport',
+        '-z1',
+        '--zmq_pushpull',
+        dest = 'zmqportPUSHPULL',
         type = int,
-        metavar='<zmqport>',
+        metavar='<zmqportPUSHPULL>',
         help='port used by ZMQ, e.g. 5556',
+        default =  None
+    )
+
+    parser.add_argument(
+        '-z2',
+        '--zmq_reqrepl',
+        dest = 'zmqportREQREPL',
+        type = int,
+        metavar='<zmqportREQREPL>',
+        help='port used by ZMQ, e.g. 5555',
         default =  None
     )
 
