@@ -33,11 +33,10 @@ from pyIMU.quaternion import Vector3D, Quaternion
 from pyIMU.utilities import q2rpy, rpymag2h
 from pyIMU.motion import Motion
 
-
+# Activate uvloop to speed up asyncio
 if os.name != 'nt':
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    import subprocess
 
 # CONSTANTS
 ################################################################
@@ -46,18 +45,13 @@ RAD2DEG = 180.0 / math.pi
 DEG2RAD = math.pi / 180.0
 TWOPI   = 2.0*math.pi
 
-# COMMUNICATION
-################################################################
-ZMQPORTPUSHPULL  = 5556
-ZMQPORTREQREP    = 5555
-
-# LOCATION
+# LOCATION (Tucson, AZ, USA)
 ################################################################
 DECLINATION  = 8.124973426113137 * DEG2RAD      # Declination at your location
-LATITUDE     = 32.253460           # [degrees] Tucson
-LONGITUDE    = -110.911789         # [degrees] Tucson
-ALTITUDE     = 730                 # [m], Tucson
-MAGFIELD     = 33078.93064435485   # [nano Tesla] Tucson
+LATITUDE     = 32.253460           # degrees
+LONGITUDE    = -110.911789         # degrees
+ALTITUDE     = 730                 # meter
+MAGFIELD     = 33078.93064435485   # nano Tesla
 MAGFIELD_MAX = 1.2*MAGFIELD/1000.  # micro Tesla
 MAGFIELD_MIN = 0.8*MAGFIELD/1000.  # micro Tesla
 
@@ -65,6 +59,9 @@ MAGFIELD_MIN = 0.8*MAGFIELD/1000.  # micro Tesla
 ################################################################
 REPORTINTERVAL                   = 1./10. # 10 Hz
 
+# Motion Detection
+# Adjust as it depends on sensor
+################################################################
 FUZZY_ACCEL_ZERO_MAX    = 10.0  # threshold for acceleration activity
 FUZZY_ACCEL_ZERO_MIN    = 9.8   # threshold for acceleration activity
 FUZZY_DELTA_ACCEL_ZERO  = 0.09  # threshold for acceleration change
@@ -141,16 +138,17 @@ def saveCalibration(filename, center, correctionMat):
         json.dump(d, file)
 
 def detectMotion(acc: float, gyr: float, acc_avg: float, gyr_avg:float) -> bool:
+    '''
     # 4 Stage Motion Detection
-    #
-    # 1. Acceleration Activity
-    # 2. Change in Acceleration
-    # 3. Gyration Activity
-    # 4. Change in Gyration
-    #
-    # Original Code is from FreeIMU Processing example
-    # Some modifications and tuning
-
+    # ------------------------
+    1. Acceleration Activity
+    2. Change in Acceleration
+    3. Gyration Activity
+    4. Change in Gyration
+    
+    Original Code is from FreeIMU Processing example with some modifications and tuning
+    '''
+    
     # ACCELEROMETER
     # -------------
     # Absolute value
@@ -166,6 +164,7 @@ def detectMotion(acc: float, gyr: float, acc_avg: float, gyr_avg:float) -> bool:
     gyr_delta_test = abs(gyr_avg - gyr) > FUZZY_DELTA_GYRO_ZERO
 
     # DEBUG for fine tuning
+    # ---------------------
     # print(abs(acc), abs(acc_avg-acc), abs(gyr), abs(gyr_avg-gyr), acc_test, acc_delta_test, gyr_test, gyr_delta_test)
 
     # Combine acceleration test, acceleration deviation test and gyro test
@@ -269,14 +268,15 @@ class icmMotionData(object):
 
 class zmqWorkerICM():
 
-    def __init__(self, logger, zmqportPUSHPULL='tcp://localhost:5556', parent=None):
+    def __init__(self, logger, zmqportPUB='tcp://localhost:5556', zmqportREP='tcp://localhost:5555', parent=None):
         super(zmqWorkerICM, self).__init__(parent)
 
         self.dataReady =  asyncio.Event()
         self.finished  =  asyncio.Event()
 
         self.logger     = logger
-        self.zmqportPUSHPULL    = zmqportPUSHPULL
+        self.zmqportPUB = zmqportPUB
+        self.zmqportREP = zmqportREP
 
         self.new_system = False
         self.new_imu    = False
@@ -284,11 +284,13 @@ class zmqWorkerICM():
         self.new_motion = False
         self.timeout    = False
 
+        self.finish_up  = False
+
         self.zmqTimeout = ZMQTIMEOUT
 
         self.logger.log(logging.INFO, 'IC20x zmqWorker initialized')
 
-    async def start(self, stop_event: asyncio.Event):
+    async def start(self):
 
         self.new_system = False
         self.new_imu    = False
@@ -308,12 +310,12 @@ class zmqWorkerICM():
         socket.setsockopt(zmq.SUBSCRIBE, b"imu")
         socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
         socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-        socket.connect(self.zmqportPUSHPULL)
+        socket.connect(self.zmqportPUB)
         poller.register(socket, zmq.POLLIN)
 
-        self.logger.log(logging.INFO, 'IC20x  zmqWorker started on {}'.format(self.zmqportPUSHPULL))
+        self.logger.log(logging.INFO, 'IC20x  zmqWorker started on {}'.format(self.zmqportPUB))
 
-        while not stop_event.is_set():
+        while not self.finish_up:
             try:
                 events = dict(await poller.poll(timeout=self.zmqTimeout))
                 if socket in events and events[socket] == zmq.POLLIN:
@@ -350,7 +352,7 @@ class zmqWorkerICM():
                     socket.setsockopt(zmq.SUBSCRIBE, b"imu")
                     socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
                     socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-                    socket.connect(self.zmqportPUSHPULL)
+                    socket.connect(self.zmqportPUB)
                     poller.register(socket, zmq.POLLIN)
                     self.new_system = \
                     self.new_imu    = \
@@ -377,7 +379,7 @@ class zmqWorkerICM():
                 socket.setsockopt(zmq.SUBSCRIBE, b"imu")
                 socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
                 socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-                socket.connect(self.zmqportPUSHPULL)
+                socket.connect(self.zmqportPUB)
                 poller.register(socket, zmq.POLLIN)
                 self.new_system = \
                 self.new_imu    = \
@@ -389,8 +391,8 @@ class zmqWorkerICM():
         context.term()
         self.finished.set()
 
-    def set_zmqportPUSHPULL(self, port):
-        self.zmqportPUSHPULL = port
+    def set_zmqportPUB(self, port):
+        self.zmqportPUB = port
 
 #########################################################################################################
 # ICM 20649
@@ -398,8 +400,7 @@ class zmqWorkerICM():
 
 class icm20x:
 
-    def __init__(self, logger=None,
-                  args=None) -> None:
+    def __init__(self, logger=None, args=None) -> None:
 
         self.args                       = args
 
@@ -407,12 +408,14 @@ class icm20x:
         self.fusion                     = args.fusion
         self.motion                     = args.motion
         self.report                     = args.report
+        self.zmqportPUB                 = args.zmqportPUB
+        self.zmqportREP                 = args.zmqportREP
         
         # Signals
         self.processedDataAvailable     = asyncio.Event()
         self.terminate                  = asyncio.Event()
 
-        # These Signals are easier to deal with without Event
+        # States
         self.connected                  = False
         self.sensorStarted              = False
         self.finish_up                  = False
@@ -421,162 +424,163 @@ class icm20x:
         else:                  self.logger = logging.getLogger('icm20x')
 
         # device sensors
-        self.sensorTime             = 0.    # Sensor Time
-        self.previous_sensorTime    = 0.    #
+        self.sensorTime                 = 0.    # Sensor Time
+        self.previous_sensorTime        = 0.    #
 
         # IMU
-        self.accX                   = 0.    # IMU Accelerometer
-        self.accY                   = 0.    #
-        self.accZ                   = 0.    #
-        self.gyrX                   = 0.    # IMY Gyroscope
-        self.gyrY                   = 0.    #
-        self.gyrZ                   = 0.    #
-        self.magX                   = 0.    # IMU Magnetometer
-        self.magY                   = 0.    #
-        self.magZ                   = 0.    #
+        self.accX                       = 0.    # IMU Accelerometer
+        self.accY                       = 0.    #
+        self.accZ                       = 0.    #
+        self.gyrX                       = 0.    # IMY Gyroscope
+        self.gyrY                       = 0.    #
+        self.gyrZ                       = 0.    #
+        self.magX                       = 0.    # IMU Magnetometer
+        self.magY                       = 0.    #
+        self.magZ                       = 0.    #
 
         # Timing
         ###################
-        self.startTime              = 0.
-        self.runTime                = 0.
+        self.startTime                  = 0.
+        self.runTime                    = 0.
 
-        self.data_deltaTime         = 0.
-        self.data_rate              = 0
-        self.data_updateCounts      = 0
-        self.data_lastTime          = time.perf_counter()
-        self.data_lastTimeRate      = time.perf_counter()
+        self.data_deltaTime             = 0.
+        self.data_rate                  = 0
+        self.data_updateCounts          = 0
+        self.data_lastTime              = \
+        self.data_lastTimeRate          = time.perf_counter()
 
-        self.fusion_deltaTime       = 0.
-        self.fusion_rate            = 0
-        self.fusion_updateCounts    = 0
-        self.fusion_lastTimeRate    = time.perf_counter()
-        self.previous_fusionTime    = time.perf_counter()
+        self.fusion_deltaTime           = 0.
+        self.fusion_rate                = 0
+        self.fusion_updateCounts        = 0
+        self.fusion_lastTimeRate        = \
+        self.previous_fusionTime        = time.perf_counter()
 
-        self.motion_deltaTime       = 0.
-        self.motion_rate            = 0
-        self.motion_updateCounts    = 0
-        self.motion_lastTimeRate    = time.perf_counter()
-        self.previous_motionTime    = time.perf_counter()
-        self.firstTimeMotion        = time.perf_counter()
+        self.motion_deltaTime           = 0.
+        self.motion_rate                = 0
+        self.motion_updateCounts        = 0
+        self.motion_lastTimeRate        = \
+        self.previous_motionTime        = \
+        self.firstTimeMotion            = time.perf_counter()
 
-        self.report_deltaTime       = 0.
-        self.report_rate            = 0
-        self.report_updateInterval  = REPORTINTERVAL
-        self.report_updateCounts    = 0
-        self.report_lastTimeRate    = time.perf_counter()
+        self.report_deltaTime           = 0.
+        self.report_rate                = 0
+        self.report_updateInterval      = REPORTINTERVAL
+        self.report_updateCounts        = 0
+        self.report_lastTimeRate        = time.perf_counter()
 
-        self.zmq_rate               = 0
-        self.zmq_deltaTime          = 0.
-        self.zmq_updateCounts       = 0
-        self.zmq_lastTimeRate       = time.perf_counter()
+        self.zmqPUB_rate                = 0
+        self.zmqPUB_deltaTime           = 0.
+        self.zmqPUB_updateCounts        = 0
+        self.zmqPUB_lastTimeRate        = time.perf_counter()
 
-        self.i2cHits                = 0
-        self.i2cCounts              = 0
+        self.i2cHits                    = 0
+        self.i2cCounts                  = 0
 
-        self.current_directory = str(pathlib.Path(__file__).parent.absolute())
+        self.current_directory          = str(pathlib.Path(__file__).parent.absolute())
 
         my_file = pathlib.Path(self.current_directory + '/Gyr.json')
         if my_file.is_file():
             self.logger.log(logging.INFO,'Loading Gyroscope Calibration from File...')
-            gyr_offset, gyr_crosscorr = loadCalibration(my_file)
+            gyr_offset, gyr_crosscorr   = loadCalibration(my_file)
         else:
             self.logger.log(logging.INFO,'Loading default Gyroscope Calibration...')
-            gyr_crosscorr  = np.array(([1.,0.,0.], [0.,1.,0.], [0.,0.,1.]))
-            gyr_offset     = np.array(([-0.01335,-0.01048,0.03801]))
+            gyr_crosscorr               = np.array(([1.,0.,0.], [0.,1.,0.], [0.,0.,1.]))
+            gyr_offset                  = np.array(([-0.01335,-0.01048,0.03801]))
 
         my_file = pathlib.Path(self.current_directory + '/Acc.json')
         if my_file.is_file():
             self.logger.log(logging.INFO,'Loading Accelerometer Calibration from File...')
-            acc_offset, acc_crosscorr = loadCalibration(my_file)
+            acc_offset, acc_crosscorr   = loadCalibration(my_file)
         else:
             self.logger.log(logging.INFO,'Loading default Accelerometer Calibration...')
-            acc_crosscorr  = np.array(([1.,0.,0.], [0.,1.,0.], [0.,0.,1.]))
-            acc_offset     = np.array(([0.,0.,0.]))
+            acc_crosscorr               = np.array(([1.,0.,0.], [0.,1.,0.], [0.,0.,1.]))
+            acc_offset                  = np.array(([0.,0.,0.]))
 
         my_file = pathlib.Path(self.current_directory + '/Mag.json')
         if my_file.is_file():
             self.logger.log(logging.INFO,'Loading Magnetometer Calibration from File...')
-            mag_offset, mag_crosscorr = loadCalibration(my_file)
+            mag_offset, mag_crosscorr   = loadCalibration(my_file)
         else:
             self.logger.log(logging.INFO,'Loading default Magnetometer Calibration...')
-            mag_crosscorr  = np.array(([1.,0.,0.], [0.,1.,0.], [0.,0.,1.]))
-            mag_offset     = np.array(([-48.492,-222.802,-35.28]))
+            mag_crosscorr               = np.array(([1.,0.,0.], [0.,1.,0.], [0.,0.,1.]))
+            mag_offset                  = np.array(([-48.492,-222.802,-35.28]))
 
-        self.acc_offset    = Vector3D(acc_offset)
-        self.gyr_offset    = Vector3D(gyr_offset)
-        self.mag_offset    = Vector3D(mag_offset)
-        self.acc_crosscorr = acc_crosscorr
-        self.gyr_crosscorr = gyr_crosscorr
-        self.mag_crosscorr = mag_crosscorr
+        self.acc_offset                 = Vector3D(acc_offset)
+        self.gyr_offset                 = Vector3D(gyr_offset)
+        self.mag_offset                 = Vector3D(mag_offset)
 
-        self.gyr_offset_updated = False
+        self.acc_crosscorr              = acc_crosscorr
+        self.gyr_crosscorr              = gyr_crosscorr
+        self.mag_crosscorr              = mag_crosscorr
 
-        self.acc           = Vector3D(0.,0.,0.)
-        self.gyr           = Vector3D(0.,0.,0.)
-        self.mag           = Vector3D(0.,0.,0.)
-        self.gyr_average   = Vector3D(0.,0.,0.)
-        self.acc_average   = Vector3D(0.,0.,0.)
+        self.gyr_offset_updated         = False
+
+        self.acc                        = Vector3D(0.,0.,0.)
+        self.gyr                        = Vector3D(0.,0.,0.)
+        self.mag                        = Vector3D(0.,0.,0.)
+        self.gyr_average                = Vector3D(0.,0.,0.)
+        self.acc_average                = Vector3D(0.,0.,0.)
 
         # Attitude fusion
-        self.AHRS          = Madgwick()
-        self.q             = Quaternion(1.,0.,0.,0.)
-        self.heading       = 0.
-        self.rpy           = Vector3D(0.,0.,0.)
+        self.AHRS                       = Madgwick()
+        self.q                          = Quaternion(1.,0.,0.,0.)
+        self.heading                    = 0.
+        self.rpy                        = Vector3D(0.,0.,0.)
 
-        self.acc_cal       = Vector3D(0.,0.,0.)
-        self.gyr_cal       = Vector3D(0.,0.,0.)
-        self.mag_cal       = Vector3D(0.,0.,0.)
+        self.acc_cal                    = Vector3D(0.,0.,0.)
+        self.gyr_cal                    = Vector3D(0.,0.,0.)
+        self.mag_cal                    = Vector3D(0.,0.,0.)
 
-        self.moving        = True
-        self.magok         = False
-        self.mag_available = False
+        self.moving                     = True
+        self.magok                      = False
+        self.mag_available              = False
 
         # Motion
-        self.Position      = Motion()
-        self.residuals     = Vector3D(0.,0.,0.)
-        self.velocity      = Vector3D(0.,0.,0.)
-        self.position      = Vector3D(0.,0.,0.)
-        self.dtmotion      = 0.
-        self.dt            = 0.
-        self.accBias       = Vector3D(0.,0.,0.)
-        self.velocityBias  = Vector3D(0.,0.,0.)
+        self.Position                   = Motion()
+        self.residuals                  = Vector3D(0.,0.,0.)
+        self.velocity                   = Vector3D(0.,0.,0.)
+        self.position                   = Vector3D(0.,0.,0.)
+        self.dtmotion                   = 0.
+        self.dt                         = 0.
+        self.accBias                    = Vector3D(0.,0.,0.)
+        self.velocityBias               = Vector3D(0.,0.,0.)
 
         # First Time Getting Data
-        self.firstTimeData     = True  # want to initialize average acc,mag,gyr with current reading first time
-        self.sensorIsBooting   = True  # need to read sensor a few times until we get reasonable data
-        self.sensorRunInCounts = 0     # for boot up
+        self.firstTimeData              = True  # want to initialize average acc,mag,gyr with current reading first time
+        self.sensorIsBooting            = True  # need to read sensor a few times until we get reasonable data
+        self.sensorRunInCounts          = 0     # for boot up
 
-        self.i2c = board.I2C()  # uses board.SCL and board.SDA
-        self.icm = ICM20649(self.i2c, address=0x69)
-        self.mag_available = False
+        self.i2c                        = board.I2C()  # uses board.SCL and board.SDA
+        self.icm                        = ICM20649(self.i2c, address=0x69)
+        self.mag_available              = False
 
-        self.icm.accelerometer_range     = AccelRange.RANGE_4G     # 4G, 8G, 16G, 30G
-        self.icm.gyro_range              = GyroRange.RANGE_500_DPS # 500, 1000, 2000, 4000
+        self.icm.accelerometer_range    = AccelRange.RANGE_4G     # 4G, 8G, 16G, 30G
+        self.icm.gyro_range             = GyroRange.RANGE_500_DPS # 500, 1000, 2000, 4000
         self.logger.log(logging.INFO, "Accelerometer range set to: {:d} g".format(AccelRange.string[self.icm.accelerometer_range]))
         self.logger.log(logging.INFO, "Gyro range set to: {:d} DPS".format(GyroRange.string[self.icm.gyro_range]))
 
         # This is output rate, internally runs at max rate
-        self.icm.gyro_data_rate          = 500                     # 4.3 .. 1100 Hz
-        self.icm.accelerometer_data_rate = 500                     # 0.27 ..1125 HZ
+        self.icm.gyro_data_rate         = 500                     # 4.3 .. 1100 Hz
+        self.icm.accelerometer_data_rate= 500                     # 0.27 ..1125 HZ
         self.logger.log(logging.INFO, "Gyro data rate set to: {:f} Hz".format(self.icm.gyro_data_rate))
         self.logger.log(logging.INFO, "Acc  data rate set to: {:f} Hz".format(self.icm.accelerometer_data_rate))
 
         # Low pass filters
-        self.icm.accel_dlpf_cutoff       = AccelDLPFFreq.FREQ_111_4HZ_3DB # 246, 111.4, 50.4, 23.9, 11.5, 5.7, 473
-        self.icm.gyro_dlpf_cutoff        = GyroDLPFFreq.FREQ_151_8HZ_3DB  # 196.6, 151.8, 119.5, 51.2, 23.9, 11.6, 5.7, 361.4, 
+        self.icm.accel_dlpf_cutoff      = AccelDLPFFreq.FREQ_111_4HZ_3DB # 246, 111.4, 50.4, 23.9, 11.5, 5.7, 473
+        self.icm.gyro_dlpf_cutoff       = GyroDLPFFreq.FREQ_151_8HZ_3DB  # 196.6, 151.8, 119.5, 51.2, 23.9, 11.6, 5.7, 361.4, 
         self.logger.log(logging.INFO, "Gyro low pass 3dB point at: {:f} Hz".format(GyroDLPFFreq.string[self.icm.gyro_dlpf_cutoff]))
         self.logger.log(logging.INFO, "Acc  low pass 3dB point at: {:f} Hz".format(AccelDLPFFreq.string[self.icm.accel_dlpf_cutoff]))
 
     def update_times(self):
-        self.data_lastTime          = \
-        self.data_lastTimeRate      = \
-        self.fusion_lastTimeRate    = \
-        self.previous_fusionTime    = \
-        self.report_lastTimeRate    = \
-        self.zmq_lastTimeRate       = \
-        self.motion_lastTimeRate    = \
-        self.previous_motionTime    = \
-        self.firstTimeMotion        = time.perf_counter()
+        self.data_lastTime              = \
+        self.data_lastTimeRate          = \
+        self.fusion_lastTimeRate        = \
+        self.previous_fusionTime        = \
+        self.report_lastTimeRate        = \
+        self.zmqPUB_lastTimeRate        = \
+        self.motion_lastTimeRate        = \
+        self.previous_motionTime        = \
+        self.firstTimeMotion            = time.perf_counter()
 
     def compute_fusion(self):
         '''
@@ -643,7 +647,7 @@ class icm20x:
     # Sensor Loop
     ##############################################################################################
 
-    async def update_data(self,stop_event: asyncio.Event):
+    async def update_data(self):
         '''
         Check if Data available
         Obtain data from sensor
@@ -651,7 +655,7 @@ class icm20x:
         Update Motion
         '''
 
-        while not stop_event.is_set():
+        while not self.finish_up:
 
             startTime = time.perf_counter()
 
@@ -687,10 +691,8 @@ class icm20x:
 
                     self.acc=Vector3D(*self.icm.acceleration)
                     self.gyr=Vector3D(*self.icm.gyro)
-                    if self.mag_available:
-                        self.mag=Vector3D(*self.icm.magnetic)
-                    else:
-                        self.mage=Vector3D(0.,0.,0.)
+                    if self.mag_available: self.mag=Vector3D(*self.icm.magnetic)
+                    else:                  self.mage=Vector3D(0.,0.,0.)
 
                     if self.firstTimeData:
                         self.firstTimeData = False
@@ -735,7 +737,6 @@ class icm20x:
                         # we need some time to compute averages, once system is stable start compute motion.
                         if start_motionUpdate - self.firstTimeMotion > 5.0:
                             self.compute_motion()
-
                             self.motion_deltaTime = time.perf_counter() - start_motionUpdate
 
                     self.processedDataAvailable.set()
@@ -769,7 +770,7 @@ class icm20x:
         self.logger.log(logging.INFO, 'Gyroscope Bias Saving Task stopped')
 
 
-    async def update_report(self, stop_event: asyncio.Event):
+    async def update_report(self):
         '''
         Report latest data
         Report fused data
@@ -784,7 +785,7 @@ class icm20x:
         await self.processedDataAvailable.wait()
         # no clear needed as we just wait for system to start
 
-        while not stop_event.is_set():
+        while not self.finish_up:
 
             startTime = time.perf_counter()
 
@@ -801,7 +802,6 @@ class icm20x:
                 msg_out+= 'icm 20x: Moving:{}, Mag:{}\n'.format(
                                                     'Y' if self.moving else 'N',
                                                     'Y' if self.magok  else 'N')
-
             msg_out+= '-------------------------------------------------\n'
 
             if self.report > 0:
@@ -810,25 +810,21 @@ class icm20x:
                 msg_out+= 'Report  {:>10.6f}, {:>3d}/s\n'.format(self.report_deltaTime*1000.,      self.report_rate)
                 if self.args.fusion:
                     msg_out+= 'Fusion  {:>10.6f}, {:>3d}/s\n'.format(self.fusion_deltaTime*1000.,  self.fusion_rate)
-                if self.args.zmqportPUSHPULL is not None:
-                    msg_out+= 'ZMQ     {:>10.6f}, {:>3d}/s\n'.format(self.zmq_deltaTime*1000.,     self.zmq_rate)
-
+                if self.zmqportPUB is not None:
+                    msg_out+= 'ZMQ     {:>10.6f}, {:>3d}/s\n'.format(self.zmqPUB_deltaTime*1000.,  self.zmqPUB_rate)
                 msg_out+= '-------------------------------------------------\n'
 
             if self.report > 1:
                 msg_out+= 'Time  {:>10.6f}, dt {:>10.6f}\n'.format(self.sensorTime, self.delta_sensorTime)
-
                 msg_out+= 'Accel     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc.x,self.acc.y,self.acc.z,self.acc.norm)
                 msg_out+= 'Gyro      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.gyr.x,self.gyr.y,self.gyr.z,self.gyr.norm)
                 msg_out+= 'Magno     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.mag.x,self.mag.y,self.mag.z,self.mag.norm)
                 msg_out+= 'Accel avg {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc_average.x, self.acc_average.y, self.acc_average.z, self.acc_average.norm)
                 msg_out+= 'Gyro  avg {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_average.x, self.gyr_average.y, self.gyr_average.z, self.gyr_average.norm*60./TWOPI)
                 msg_out+= 'Gyro bias {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_offset.x, self.gyr_offset.y, self.gyr_offset.z, self.gyr_offset.norm*60./TWOPI)
-
                 msg_out+= '-------------------------------------------------\n'
 
                 if self.fusion:
-
                     msg_out+= 'Acc     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc_cal.x,self.acc_cal.y,self.acc_cal.z,self.acc_cal.norm)
                     msg_out+= 'Gyr     {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_cal.x,self.gyr_cal.y,self.gyr_cal.z,self.gyr_cal.norm*60./TWOPI)
                     msg_out+= 'Mag     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.mag_cal.x,self.mag_cal.y,self.mag_cal.z,self.mag_cal.norm)
@@ -840,7 +836,6 @@ class icm20x:
 
                 if self.motion:
                     msg_out+= '-------------------------------------------------\n'
-
                     msg_out+= 'Residual {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.residuals.x,self.residuals.y,self.residuals.z,self.residuals.norm)
                     msg_out+= 'Vel      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.velocity.x,self.velocity.y,self.velocity.z,self.velocity.norm)
                     msg_out+= 'Pos      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.position.x,self.position.y,self.position.z,self.position.norm)
@@ -860,7 +855,7 @@ class icm20x:
 
         self.logger.log(logging.INFO, 'Reporting stopped')
 
-    async def update_zmqPUB(self, stop_event: asyncio.Event):
+    async def update_zmqPUB(self):
         '''
         Report data on ZMQ socket
         There are 4 data packets presented:
@@ -870,11 +865,11 @@ class icm20x:
          - motion if enabled
         '''
 
-        self.logger.log(logging.INFO, 'Creating ZMQ Publisher at \'tcp://*:{}\' ...'.format(self.args.zmqportPUSHPULL))
+        self.logger.log(logging.INFO, 'Creating ZMQ Publisher at \'tcp://*:{}\' ...'.format(self.zmqportPUB))
 
         context = zmq.asyncio.Context()
         socket = context.socket(zmq.PUB)
-        socket.bind("tcp://*:{}".format(self.args.zmqportPUSHPULL))
+        socket.bind("tcp://*:{}".format(self.zmqportPUB))
 
         data_system  = icmSystemData()
         data_imu     = icmIMUData()
@@ -884,7 +879,7 @@ class icm20x:
         self.zmqPUB_lastTimeRate   = time.perf_counter()
         self.zmqPUB_updateCounts   = 0
 
-        while not stop_event.is_set():
+        while not self.finish_up:
 
             startTime = time.perf_counter()
 
@@ -911,7 +906,7 @@ class icm20x:
             # format the system data
             data_system.data_rate      = self.data_rate
             data_system.fusion_rate    = self.fusion_rate
-            data_system.zmq_rate       = self.zmq_rate
+            data_system.zmq_rate       = self.zmqPUB_rate
             data_system.reporting_rate = self.report_rate
             system_msgpack = msgpack.packb(obj2dict(vars(data_system)))
             socket.send_multipart([b"system", system_msgpack])
@@ -937,7 +932,7 @@ class icm20x:
                 data_motion.velocity  = self.velocity
                 data_motion.residuals = self.residuals
                 data_motion.dtmotion  = self.dtmotion
-                motion_msgpack = msgpack.packb(obj2dict(vars(data_motion)))
+                motion_msgpack        = msgpack.packb(obj2dict(vars(data_motion)))
                 socket.send_multipart([b"motion", motion_msgpack])
 
             # update interval
@@ -945,9 +940,9 @@ class icm20x:
 
             await asyncio.sleep(0)
 
-        self.logger.log(logging.INFO, 'ZMQ stopped')
+        self.logger.log(logging.INFO, 'ZMQ PUB stopped')
 
-    async def update_zmqREP(self, stop_event: asyncio.Event):
+    async def update_zmqREP(self):
         '''
         Handle program control
         - fusion
@@ -956,36 +951,27 @@ class icm20x:
         - stop
         '''
 
-        self.logger.log(logging.INFO, 'Creating ZMQ Reply at \'tcp://*:{}\' ...'.format(self.args.zmqportREQREP))
+        self.logger.log(logging.INFO, 'Creating ZMQ Reply at \'tcp://*:{}\' ...'.format(self.zmqportREP))
 
         context = zmq.asyncio.Context()
         socket  = context.socket(zmq.REQ)
-        socket.bind("tcp://*:{}".format(self.args.zmqportREQREP))
+        socket.bind("tcp://*:{}".format(self.zmqportREP))
 
         poller = zmq.asyncio.Poller()
         poller.register(socket, zmq.POLLIN)
 
-        self.zmqREP_lastTimeRate   = time.perf_counter()
-        self.zmqREP_updateCounts   = 0
-
-        while not stop_event.is_set():
+        while not self.finish_up:
 
             startTime = time.perf_counter()
-
-            # fps
-            self.zmqREP_updateCounts += 1
-            if (startTime - self.zmqREP_lastTimeRate)>= 1.:
-                self.zmqREP_rate = copy(self.zmqREP_updateCounts)
-                self.zmqREP_lastTimeRate = copy(startTime)
-                self.zmqREP_updateCounts = 0
 
             events = dict(await poller.poll(timeout=-1))
             if socket in events and events[socket] == zmq.POLLIN:
                 response = await socket.recv_multipart()
                 if len(response) == 2:
-                    [topic, msg] = response
+                    [topic, value_bytes] = response
+                    value = int(value_bytes.decode())
                     if topic == b"motion":
-                        if msg == b"True":
+                        if value == 1:
                             self.motion = True
                             self.fusion = True
                         else:
@@ -993,26 +979,24 @@ class icm20x:
                             self.fusion = False
                         socket.send_string("OK")
                     elif topic == b"fusion":
-                        if msg == b"True":
-                            self.fusion = True
-                        else:
-                            self.fusion = False
+                        if value == 1: self.fusion = True
+                        else:          self.fusion = False
                         socket.send_string("OK")
                     elif topic == b"report":
-                        msg_str = msg.decode("utf-8")  # Convert bytes to string
-                        self.report = int(msg_str)
+                        self.report = value
                         socket.send_string("OK")
                     elif topic == b"stop":
-                        if msg == b"True":
+                        if value == 1: 
                             self.terminate.set()
-                        else:
+                            self.finish_up = True
+                        else:          
                             self.terminate.clear()
+                            self.finish_up = False
                         socket.send_string("OK")
                     else:
                         socket.send_string("UNKNOWN")
                 else:
-                    self.logger.log(
-                        logging.ERROR, 'ICM zmqWorker malformed message')
+                    self.logger.log(logging.ERROR, 'ICM zmqWorker rep malformed message')
                     socket.send_string("ERROR")
 
             # update interval
@@ -1020,34 +1004,32 @@ class icm20x:
 
             await asyncio.sleep(0)
 
-        self.logger.log(logging.INFO, 'ZMQ stopped')
+        self.logger.log(logging.INFO, 'ZMQ REP stopped')
 
-    async def handle_termination(self, stop_events, tasks):
+    async def handle_termination(self, tasks):
         '''
         Cancel slow tasks based on provided list (speed up closing for program)
         '''
-        self.logger.log(logging.INFO, 'Control-C or Kill signal detected')
+        self.logger.log(logging.INFO, 'Control-C or kill signal detected')
         if tasks is not None:
-            self.logger.log(logging.INFO, 'Cancelling all Tasks...')
-            for stop_event in stop_events:
-                stop_event.set()
+            self.logger.log(logging.INFO, 'Cancelling all tasks ...')
+            self.finish_up = True
             await asyncio.sleep(1) # give some time for tasks to finish up
             for task in tasks:
                 if task is not None:
                     task.cancel()
 
-    async def update_terminator(self, stop_event: asyncio.Event, tasks, stop_events):
+    async def update_terminator(self, tasks):
         '''
         Wrapper for Task Termination
         Waits for termination signal and then executes the termination sequence
         '''
         self.logger.log(logging.INFO, 'Starting Terminator...')
 
-        while not stop_event.is_set():
-
+        while not self.finish_up:
             await self.terminate.wait()
             self.terminate.clear()
-            await self.handle_termination(stop_events=stop_events, tasks=tasks)
+            await self.handle_termination(tasks=tasks)
 
         self.logger.log(logging.INFO, 'Terminator completed')
 
@@ -1057,38 +1039,42 @@ class icm20x:
 
 async def main(args: argparse.Namespace):
 
-    stop_event  = asyncio.Event()
-    stop_event.clear()
-    stop_events = [stop_event]
-
     # Setup logging
     logger = logging.getLogger(__name__)
-    logger.log(logging.INFO, 'Starting ICM 20649 IMU...')
+    logger.log(logging.INFO, 'Starting ICM 20649 IMU ...')
 
     # ICM IMU
     imu = icm20x(logger=logger, args=args)
 
     # Create all the async tasks
-    # They will run until stop signal is created, stop signal is indicated with event
-    imu_task = asyncio.create_task(imu.update_data(stop_event=stop_event))
+    imu_task           = asyncio.create_task(imu.update_data())
 
-    tasks = [imu_task]    # frequently used tasks
-    terminator_tasks = [] # slow tasks, long wait times
+    tasks              = [imu_task]    # frequently used tasks
+    terminator_tasks   = [] # slow tasks, long wait times
 
     if args.fusion:
-        gyroffset_task  = asyncio.create_task(imu.update_gyrOffset(stop_event=stop_event))
+        # Saving the gyroscope offset
+        gyroffset_task = asyncio.create_task(imu.update_gyrOffset())
         tasks.append(gyroffset_task)
         terminator_tasks.append(gyroffset_task)
 
     if args.report > 0:
-        reporting_task  = asyncio.create_task(imu.update_report(stop_event=stop_event))   # report new data, will not terminate
+        # Reporting to terminal
+        reporting_task = asyncio.create_task(imu.update_report())   # report new data, will not terminate
         tasks.append(reporting_task)
 
-    if args.zmqportPUSHPULL is not None:
-        zmq_task     = asyncio.create_task(imu.update_zmqPUB(stop_event=stop_event))         # update zmq, will not terminate
-        tasks.append(zmq_task)
-    
-    terminator_task = asyncio.create_task(imu.update_terminator(stop_event=stop_event, tasks=terminator_tasks, stop_events=stop_events)) # make sure we shutdown in timely fashion
+    if args.zmqportPUB is not None:
+        # Provide ZMQ IMU data
+        zmq_task_pub   = asyncio.create_task(imu.update_zmqPUB())  # update zmq, will not terminate
+        tasks.append(zmq_task_pub)
+
+    if args.zmqportREP is not None:
+        # listen to external commands
+        zmq_task_rep   = asyncio.create_task(imu.update_zmqREP())  # update zmq, will not terminate
+        tasks.append(zmq_task_rep)
+
+    # Shut down tasks with long wait periods
+    terminator_task    = asyncio.create_task(imu.update_terminator(tasks=terminator_tasks)) # make sure we shutdown in timely fashion
     tasks.append(terminator_task)
 
     # Set up a Control-C handler to gracefully stop the program
@@ -1096,8 +1082,8 @@ async def main(args: argparse.Namespace):
     if os.name == 'posix':
         # Get the main event loop
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT,  lambda: asyncio.create_task(imu.handle_termination(tasks=tasks, stop_events=stop_events)) ) # control-c
-        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(imu.handle_termination(tasks=tasks, stop_events=stop_events)) ) # kill
+        loop.add_signal_handler(signal.SIGINT,  lambda: asyncio.create_task(imu.handle_termination(tasks=tasks)) ) # control-c
+        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(imu.handle_termination(tasks=tasks)) ) # kill
 
     # Wait until all tasks are completed, which is when user wants to terminate the program
     await asyncio.wait(tasks, timeout=float('inf'))
@@ -1145,23 +1131,23 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '-z1',
-        '--zmq_pushpull',
-        dest = 'zmqportPUSHPULL',
+        '-zp',
+        '--zmq_pub',
+        dest = 'zmqportPUB',
         type = int,
-        metavar='<zmqportPUSHPULL>',
+        metavar='<zmqportPUB>',
         help='port used by ZMQ, e.g. 5556',
-        default =  None
+        default =  5556
     )
 
     parser.add_argument(
-        '-z2',
-        '--zmq_reqrepl',
-        dest = 'zmqportREQREPL',
+        '-zr',
+        '--zmq_rep',
+        dest = 'zmqportREP',
         type = int,
-        metavar='<zmqportREQREPL>',
+        metavar='<zmqportREP>',
         help='port used by ZMQ, e.g. 5555',
-        default =  None
+        default = 5555
     )
 
     args = parser.parse_args()
