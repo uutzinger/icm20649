@@ -972,10 +972,9 @@ class icm20x:
             if socket in events and events[socket] == zmq.POLLIN:
                 response = await socket.recv_multipart()
                 if len(response) == 2:
-                    [topic, value_bytes] = response
-                    value = int(value_bytes.decode())
+                    [topic, value] = response
                     if topic == b"motion":
-                        if value == 1:
+                        if value == b"\x01":
                             self.motion = True
                             self.fusion = True
                         else:
@@ -983,14 +982,14 @@ class icm20x:
                             self.fusion = False
                         socket.send_string("OK")
                     elif topic == b"fusion":
-                        if value == 1: self.fusion = True
-                        else:          self.fusion = False
+                        if value == b"\x01": self.fusion = True
+                        else:                self.fusion = False
                         socket.send_string("OK")
                     elif topic == b"report":
-                        self.report = value
+                        self.report = int.from_bytes(value)
                         socket.send_string("OK")
                     elif topic == b"stop":
-                        if value == 1: 
+                        if value == b"\x01": 
                             self.terminate.set()
                             self.finish_up = True
                         else:          
