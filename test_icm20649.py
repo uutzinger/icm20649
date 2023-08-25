@@ -81,15 +81,17 @@ if __name__ == '__main__':
     )
 
     logger.log(logging.INFO, 'Turning on Fusion, Displaying Data')
+    logger.log(logging.INFO, 'Connecting to port {}'.format(args.zmqportREP))
 
     context = zmq.Context()
     socket = context.socket(zmq.REQ)
     socket.connect(args.zmqportREP)
 
-    socket.setsockopt(zmq.RCVTIMEO, 500)
+    # socket.setsockopt(zmq.RCVTIMEO, 500)
 
     communicationError = False
-    # Turn on fusion
+
+# Turn on fusion
     try:
         socket.send_multipart([b"fusion", b"\x01"])
         response = socket.recv_string()

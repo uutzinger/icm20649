@@ -966,48 +966,60 @@ class icm20x:
 
         while not self.finish_up:
 
-            startTime = time.perf_counter()
-
-            events = dict(await poller.poll(timeout=-1))
-            if socket in events and events[socket] == zmq.POLLIN:
-                response = await socket.recv_multipart()
-                if len(response) == 2:
-                    [topic, value] = response
-                    if topic == b"motion":
-                        if value == b"\x01":
-                            self.motion = True
-                            self.fusion = True
+            startTime = time.perf_counter
+            
+            try: 
+                events = dict(await poller.poll(timeout=-1))
+                if socket in events and events[socket] == zmq.POLLIN:
+                    response = await socket.recv_multipart()
+                    if len(response) == 2:
+                        [topic, value] = response
+                        if topic == b"motion":
+                            if value == b"\x01":
+                                self.motion = True
+                                self.fusion = True
+                            else:
+                                self.motion = False
+                                self.fusion = False
+                            socket.send_string("OK")
+                        elif topic == b"fusion":
+                            if value == b"\x01": self.fusion = True
+                            else:                self.fusion = False
+                            socket.send_string("OK")
+                        elif topic == b"report":
+                            self.report = int.from_bytes(value)
+                            socket.send_string("OK")
+                        elif topic == b"stop":
+                            if value == b"\x01": 
+                                self.terminate.set()
+                                self.finish_up = True
+                            else:          
+                                self.terminate.clear()
+                                self.finish_up = False
+                            socket.send_string("OK")
                         else:
-                            self.motion = False
-                            self.fusion = False
-                        socket.send_string("OK")
-                    elif topic == b"fusion":
-                        if value == b"\x01": self.fusion = True
-                        else:                self.fusion = False
-                        socket.send_string("OK")
-                    elif topic == b"report":
-                        self.report = int.from_bytes(value)
-                        socket.send_string("OK")
-                    elif topic == b"stop":
-                        if value == b"\x01": 
-                            self.terminate.set()
-                            self.finish_up = True
-                        else:          
-                            self.terminate.clear()
-                            self.finish_up = False
-                        socket.send_string("OK")
+                            socket.send_string("UNKNOWN")
                     else:
-                        socket.send_string("UNKNOWN")
-                else:
-                    self.logger.log(logging.ERROR, 'ICM zmqWorker rep malformed message')
-                    socket.send_string("ERROR")
+                        self.logger.log(logging.ERROR, 'ICM zmqWorker rep malformed message')
+                        socket.send_string("ERROR")
 
+            except:
+                self.logger.log(logging.ERROR, 'ICM zmqWorker rep error')
+                poller.unregister(socket)
+                socket.close()
+                socket = context.socket(zmq.REP)
+                socket.bind("tcp://*:{}".format(self.zmqPortREP))
+                poller.register(socket, zmq.POLLIN)
+                
             # update interval
             self.zmqREP_deltaTime = time.perf_counter() - startTime
 
             await asyncio.sleep(0)
 
         self.logger.log(logging.INFO, 'ZMQ REP stopped')
+        socket.close()
+        context.term()
+        
 
     async def handle_termination(self, tasks):
         '''
