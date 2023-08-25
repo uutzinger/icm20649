@@ -7,12 +7,10 @@
 ################################################################
 
 # IMPORTS
-#########################################u#######################
-import math
+################################################################
+import zmq
 import logging
 import argparse
-import time
-import zmq
 
 # MAIN
 ##############################################################################################
@@ -38,7 +36,7 @@ if __name__ == '__main__':
         dest = 'zmqport',
         type = str,
         metavar='<zmqport>',
-        help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5555\'',
+        help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5554\'',
         default = 'tcp://localhost:5551'
     )
 
@@ -58,8 +56,7 @@ if __name__ == '__main__':
     socket = context.socket(zmq.REQ)
     socket.connect(args.zmqport)
 
-    # socket.setsockopt(zmq.RCVTIMEO, 500)
-
+    socket.setsockopt(zmq.RCVTIMEO, 1000)
     communicationError = False
 
     # Turn on fusion
@@ -89,4 +86,4 @@ if __name__ == '__main__':
         logger.log(logging.ERROR, 'Reporting no response')
         communicationError = True
 
-    logger.log(logging.INFO, 'Reporting stopped')
+    logger.log(logging.INFO, 'Test finished')

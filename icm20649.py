@@ -944,7 +944,7 @@ class icm20x:
 
             await asyncio.sleep(0)
 
-        self.logger.log(logging.INFO, 'ZMQ PUB stopped')
+        self.logger.log(logging.INFO, 'ZMQ PUB finished')
 
     async def update_zmqREP(self):
         '''
@@ -955,10 +955,10 @@ class icm20x:
         - stop
         '''
 
-        self.logger.log(logging.INFO, 'Creating ZMQ Reply at \'tcp://*:{}\' ...'.format(self.zmqportREP))
+        self.logger.log(logging.INFO, 'Creating ZMQ Request/Reply at \'tcp://*:{}\' ...'.format(self.zmqportREP))
 
         context = zmq.asyncio.Context()
-        socket  = context.socket(zmq.REQ)
+        socket  = context.socket(zmq.REP)
         socket.bind("tcp://*:{}".format(self.zmqportREP))
 
         poller = zmq.asyncio.Poller()
@@ -982,13 +982,16 @@ class icm20x:
                                 self.motion = False
                                 self.fusion = False
                             socket.send_string("OK")
+                            self.logger.log(logging.INFO, 'ZMQ motion received: {}'.format(value))
                         elif topic == b"fusion":
                             if value == b"\x01": self.fusion = True
                             else:                self.fusion = False
                             socket.send_string("OK")
+                            self.logger.log(logging.INFO, 'ZMQ fusion received: {}'.format(value))
                         elif topic == b"report":
-                            self.report = int.from_bytes(value)
+                            self.report = int.from_bytes(value, byteorder='big', signed=True)
                             socket.send_string("OK")
+                            self.logger.log(logging.INFO, 'ZMQ report received: {}'.format(value))
                         elif topic == b"stop":
                             if value == b"\x01": 
                                 self.terminate.set()
@@ -997,14 +1000,16 @@ class icm20x:
                                 self.terminate.clear()
                                 self.finish_up = False
                             socket.send_string("OK")
+                            self.logger.log(logging.INFO, 'ZMQ stop received: {}'.format(value))
                         else:
                             socket.send_string("UNKNOWN")
+                            self.logger.log(logging.INFO, 'ZMQ received UNKNOWN')
                     else:
-                        self.logger.log(logging.ERROR, 'ICM zmqWorker rep malformed message')
+                        self.logger.log(logging.ERROR, 'ICM zmqWorker receiver malformed REQ message')
                         socket.send_string("ERROR")
 
             except:
-                self.logger.log(logging.ERROR, 'ICM zmqWorker rep error')
+                self.logger.log(logging.ERROR, 'ICM zmqWorker REQ/REP error')
                 poller.unregister(socket)
                 socket.close()
                 socket = context.socket(zmq.REP)
@@ -1016,7 +1021,7 @@ class icm20x:
 
             await asyncio.sleep(0)
 
-        self.logger.log(logging.INFO, 'ZMQ REP stopped')
+        self.logger.log(logging.INFO, 'ZMQ REQ/REP finished')
         socket.close()
         context.term()
         

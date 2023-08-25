@@ -14,10 +14,15 @@ import zmq
 import zmq.asyncio
 import argparse
 import os
+import signal
+import msgpack
 import time
 
 # Activate uvloop to speed up asyncio
-if os.name != 'nt':
+if os.name == 'nt':
+    from asyncio.windows_events import WindowsSelectorEventLoopPolicy
+    asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+else:
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -25,49 +30,44 @@ if os.name != 'nt':
 # Simple
 #########################################################################################################
 
-class zmqWorker:
+class zmqWorkerSimple:
 
-    def __init__(self, logger=None, args=None) -> None:
+    def __init__(self, logger, zmqPort: int = 5551):
 
-        self.args                       = args
         self.logger                     = logger
-
-        self.zmqport                 = args.zmqport
+        self.zmqPort                    = zmqPort
 
         self.finish_up                  = False
-
-        # Timing
-        ###################
-        self.startTime                  = 0.
-
         self.fusion = False
         self.motion = False
         self.report = 0
 
-        self.terminate = asyncio.Event()
+        self.startTime                  = 0.
 
+        self.terminate = asyncio.Event()
+        self.logger.log(logging.INFO, 'Simple zmqWorker initialized')
 
     async def start(self):
         '''
-        Handle program control
+        Simulate program control
         - fusion
         - motion
         - report
         - stop
         '''
 
-        self.logger.log(logging.INFO, 'Creating ZMQ Reply at \'tcp://*:{}\' ...'.format(self.zmqport))
-
         context = zmq.asyncio.Context()
-        socket  = context.socket(zmq.REQ)
-        socket.bind("tcp://*:{}".format(self.zmqport))
+        socket = context.socket(zmq.REP)
+        socket.bind("tcp://*:{}".format(self.zmqPort))
 
         poller = zmq.asyncio.Poller()
         poller.register(socket, zmq.POLLIN)
 
+        self.logger.log(logging.INFO, 'Creating ZMQ Reply at \'tcp://*:{}\' ...'.format(self.zmqPort))
+
         while not self.finish_up:
 
-            startTime = time.perf_counter
+            startTime = time.perf_counter()
 
             try:
                 events = dict(await poller.poll(timeout=-1))
@@ -90,7 +90,7 @@ class zmqWorker:
                             socket.send_string("OK")
                             self.logger.log(logging.INFO, 'ZMQ fusion received: {}'.format(value))
                         elif topic == b"report":
-                            self.report = int.from_bytes(value)
+                            self.report = int.from_bytes(value, byteorder='big', signed=True)
                             socket.send_string("OK")
                             self.logger.log(logging.INFO, 'ZMQ report received: {}'.format(value))
                         elif topic == b"stop":
@@ -106,15 +106,15 @@ class zmqWorker:
                             socket.send_string("UNKNOWN")
                             self.logger.log(logging.INFO, 'ZMQ received UNKNOWN')
                     else:
-                        self.logger.log(logging.ERROR, 'ICM zmqWorker rep malformed message')
+                        self.logger.log(logging.ERROR, 'zmqWorker received malformed REQ message')
                         socket.send_string("ERROR")
 
             except:
-                self.logger.log(logging.ERROR, 'ICM zmqWorker REQ/REP error')
+                self.logger.log(logging.ERROR, 'zmqWorker REQ/REP error')
                 poller.unregister(socket)
                 socket.close()
                 socket = context.socket(zmq.REP)
-                socket.bind("tcp://*:{}".format(self.zmqport))
+                socket.bind("tcp://*:{}".format(self.zmqPort))
                 poller.register(socket, zmq.POLLIN)
 
             # update interval
@@ -122,11 +122,23 @@ class zmqWorker:
 
             await asyncio.sleep(0)
 
-        self.logger.log(logging.INFO, 'ZMQ REP stopped')
+        self.logger.log(logging.INFO, 'Simple ZMQ worker finished')
         socket.close()
         context.term()
 
-
+async def handle_termination(zmq, logger, tasks):
+    '''
+    Cancel slow tasks based on provided list (speed up closing of program)
+    '''
+    logger.log(logging.INFO, 'Controller ESC, Control-C or Kill signal detected')
+    if tasks is not None: # This will terminate tasks faster
+        logger.log(logging.INFO, 'Cancelling all Tasks...')
+        zmq.finish_up = True
+        await asyncio.sleep(1) # give some time for tasks to finish up
+        for task in tasks:
+            if task is not None:
+                task.cancel()
+                
 ##############################################################################################
 # MAIN
 ##############################################################################################
@@ -137,23 +149,27 @@ async def main(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     logger.log(logging.INFO, 'Starting Simple ...')
 
-    zmq = zmqWorker(logger=logger, args=args)
+    zmq = zmqWorkerSimple(logger=logger, zmqPort=args.zmqport)
 
-    tasks = []
+    zmq_task = asyncio.create_task(zmq.start())
+    tasks = [zmq_task]
 
-    if args.zmqport is not None:
-        # listen to external commands
-        zmq_task = asyncio.create_task(zmq.start())
-        tasks.append(zmq_task)
+    # Set up a Control-C handler to gracefully stop the program
+    # This mechanism is only available in Unix
+    if os.name == 'posix':
+        # Get the main event loop
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT,  lambda: asyncio.create_task(handle_termination(zmq=zmq, logger=logger, tasks=tasks)) ) # control-c
+        loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(handle_termination(zmq=zmq, logger=logger, tasks=tasks)) ) # kill
 
     # Wait until all tasks are completed, which is when user wants to terminate the program
     await asyncio.wait(tasks, timeout=float('inf'))
 
-    logger.log(logging.INFO,'Simple exit')
+    logger.log(logging.INFO,'Simple ZMQ exit')
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser(description="Simple")
+    parser = argparse.ArgumentParser()
 
     parser.add_argument(
         '-d',
@@ -168,8 +184,8 @@ if __name__ == '__main__':
         '--zmq',
         dest = 'zmqport',
         type = int,
-        metavar='<zmqportREP>',
-        help='port used by ZMQ, e.g. 5551',
+        metavar='<zmqport>',
+        help='port used by ZMQ, e.g. 5554 for \'tcp://*:5554\'',
         default = 5551
     )
 
