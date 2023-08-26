@@ -61,7 +61,7 @@ MAGFIELD_MIN = 0.8*MAGFIELD/1000.  # micro Tesla
 # Program Timing:
 ################################################################
 REPORTINTERVAL                   = 1./10. # 10 Hz
-ZMQTIMEOUT                       = 1000 # milli second
+ZMQTIMEOUT                       = 10000  # milli second
 
 # Motion Detection
 # Adjust as it depends on sensor
@@ -274,7 +274,7 @@ class icmMotionData(object):
 
 class zmqWorkerICM():
 
-    def __init__(self, logger, zmqPortPUB='tcp://localhost:5556', parent=None):
+    def __init__(self, logger, zmqPortPUB='tcp://localhost:5556'):
 
         self.dataReady =  asyncio.Event()
         self.finished  =  asyncio.Event()
@@ -289,6 +289,7 @@ class zmqWorkerICM():
         self.timeout    = False
 
         self.finish_up  = False
+        self.paused     = False
 
         self.zmqTimeout = ZMQTIMEOUT
 
@@ -343,7 +344,8 @@ class zmqWorkerICM():
                             self.data_motion = dict2obj(msg_dict)
                             self.new_motion = True
                         else:
-                            pass  # not a topic we need
+                            self.logger.log(
+                                logging.INFO, 'IC20x zmqWorker topic not of interest {}'.format(topic))
                     else:
                         self.logger.log(
                             logging.ERROR, 'IC20x zmqWorker malformed message')
