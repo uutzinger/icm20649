@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 ################################################################
-# ICM 20649 IMU
+# ICM 20649 IMU Display Test Program
 #
 # Urs Utzinger, Summer 2023
 ################################################################
@@ -19,10 +19,11 @@ import zmq.asyncio
 
 from icm20649 import zmqWorkerICM
 
-from pyIMU.quaternion import Vector3D, Quaternion
-
 # Activate uvloop to speed up asyncio
-if os.name != 'nt':
+if os.name == 'nt':
+    from asyncio.windows_events import WindowsSelectorEventLoopPolicy
+    asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+else:
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -33,65 +34,45 @@ TWOPI   = 2.0*math.pi
 
 report_updateInterval = 0.1
 
+async def handle_termination(zmq, logger, tasks):
+    '''
+    Cancel slow tasks based on provided list (speed up closing for program)
+    Not applicable on Windows
+    '''
+    logger.log(logging.INFO, 'Control-C or kill signal detected')
+    if tasks is not None:
+        logger.log(logging.INFO, 'Cancelling all tasks ...')
+        zmq.finish_up = True
+        await asyncio.sleep(1) # give some time for tasks to finish up
+        for task in tasks:  # force task cancel if it still running
+            if task is not None:
+                task.cancel()
+                
 # MAIN
 ##############################################################################################
 
-if __name__ == '__main__':
+async def main(args: argparse.Namespace):
 
     # Setup logging
     logger = logging.getLogger(__name__)
 
-    parser = argparse.ArgumentParser()
+    logger.log(logging.INFO, 'Testing ICM sensor')
 
-    parser.add_argument(
-        '-d',
-        '--debug',
-        action='store_true',
-        help='sets the log level from info to debug',
-        default = False
-    )
+    #########################################################
+    # Change the settings of the data publisher
+    #########################################################
 
-    parser.add_argument(
-        '-zp',
-        '--zmq_pub',
-        dest = 'zmqportPUB',
-        type = str,
-        metavar='<zmqportPUB>',
-        help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5556\'',
-        default = 'tcp://localhost:5556'
-    )
-
-    parser.add_argument(
-        '-zr',
-        '--zmq_rep',
-        dest = 'zmqportREP',
-        type = str,
-        metavar='<zmqportREP>',
-        help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5555\'',
-        default = 'tcp://localhost:5555'
-    )
-
-    args = parser.parse_args()
-
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        # format='%(asctime)-15s %(name)-8s %(levelname)s: %(message)s'
-        format='%(asctime)-15s %(levelname)s: %(message)s'
-    )
-
-    logger.log(logging.INFO, 'Turning on Fusion, Displaying Data')
     logger.log(logging.INFO, 'Connecting to port {}'.format(args.zmqportREP))
 
     context = zmq.Context()
     socket = context.socket(zmq.REQ)
     socket.connect(args.zmqportREP)
+    socket.setsockopt(zmq.RCVTIMEO, 1000)
 
-    # socket.setsockopt(zmq.RCVTIMEO, 500)
+    logger.log(logging.INFO, 'Turning on Fusion, Displaying Data')
 
     communicationError = False
-
-# Turn on fusion
+    # Turn on fusion
     try:
         socket.send_multipart([b"fusion", b"\x01"])
         response = socket.recv_string()
@@ -118,10 +99,23 @@ if __name__ == '__main__':
         logger.log(logging.ERROR, 'Reporting no response')
         communicationError = True
 
-    if not communicationError:
-        zmqWorker =  zmqWorkerICM(logger=logger, zmqportPUB=args.zmqportPUB, parent=None)
+    #########################################################
+    # Listen to data publisher and display data
+    #########################################################
 
+    if not communicationError:
+
+        # Lisen to sensors data server/publisher
+        zmqWorker =  zmqWorkerICM(logger=logger, zmqPortPUB=args.zmqPortPUB, parent=None)
         imu_task = asyncio.create_task(zmqWorker.start())
+        tasks = [imu_task]
+
+        # Set up a Control-C handler to gracefully stop the program
+        if os.name == 'posix':
+            # Get the main event loop
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGINT,  lambda: asyncio.create_task(imu.handle_termination(zmq=zmqWorker, logger=logger, tasks=tasks)) ) # control-c
+            loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(imu.handle_termination(zmq=zmqWorker, logger=logger, tasks=tasks)) ) # kill
 
         while True:
             reportTime = time.perf_counter()
@@ -166,8 +160,55 @@ if __name__ == '__main__':
             print(msg_out, flush=True)
 
 
-            sleepTime = report_updateInterval - (time.perf_counter()-reportTime)
+            sleepTime = report_updateInterval - (time.perf_counter() - reportTime)
             time.sleep(max(0.,sleepTime))
 
 
     logger.log(logging.INFO, 'Reporting stopped')
+
+
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        '-d',
+        '--debug',
+        action='store_true',
+        help='sets the log level from info to debug',
+        default = False
+    )
+
+    parser.add_argument(
+        '-zp',
+        '--zmq_pub',
+        dest = 'zmqPortPUB',
+        type = str,
+        metavar='<zmqPortPUB>',
+        help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5556\'',
+        default = 'tcp://localhost:5556'
+    )
+
+    parser.add_argument(
+        '-zr',
+        '--zmq_rep',
+        dest = 'zmqportREP',
+        type = str,
+        metavar='<zmqportREP>',
+        help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5555\'',
+        default = 'tcp://localhost:5555'
+    )
+
+    args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        # format='%(asctime)-15s %(name)-8s %(levelname)s: %(message)s'
+        format='%(asctime)-15s %(levelname)s: %(message)s'
+    )
+
+    try:
+        asyncio.run(main(args))
+    except KeyboardInterrupt:
+        pass

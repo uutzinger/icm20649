@@ -34,7 +34,10 @@ from pyIMU.utilities import q2rpy, rpymag2h
 from pyIMU.motion import Motion
 
 # Activate uvloop to speed up asyncio
-if os.name != 'nt':
+if os.name == 'nt':
+    from asyncio.windows_events import WindowsSelectorEventLoopPolicy
+    asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+else:
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -58,6 +61,7 @@ MAGFIELD_MIN = 0.8*MAGFIELD/1000.  # micro Tesla
 # Program Timing:
 ################################################################
 REPORTINTERVAL                   = 1./10. # 10 Hz
+ZMQTIMEOUT                       = 1000 # milli second
 
 # Motion Detection
 # Adjust as it depends on sensor
@@ -202,8 +206,10 @@ class dict2obj:
 class icmSystemData(object):
     '''System relevant performance data'''
     def __init__(self,  
-                 data_rate: int = 0, fusion_rate:    int = 0, 
-                 zmq_rate:  int = 0, reporting_rate: int = 0) -> None:
+                 data_rate:      int = 0, 
+                 fusion_rate:    int = 0, 
+                 zmq_rate:       int = 0, 
+                 reporting_rate: int = 0) -> None:
         self.data_rate       = data_rate
         self.fusion_rate     = fusion_rate
         self.zmq_rate        = zmq_rate
@@ -268,14 +274,13 @@ class icmMotionData(object):
 
 class zmqWorkerICM():
 
-    def __init__(self, logger, zmqportPUB='tcp://localhost:5556', parent=None):
-        super(zmqWorkerICM, self).__init__(parent)
+    def __init__(self, logger, zmqPortPUB='tcp://localhost:5556', parent=None):
 
         self.dataReady =  asyncio.Event()
         self.finished  =  asyncio.Event()
 
         self.logger     = logger
-        self.zmqportPUB = zmqportPUB
+        self.zmqPortPUB = zmqPortPUB
 
         self.new_system = False
         self.new_imu    = False
@@ -299,20 +304,20 @@ class zmqWorkerICM():
         context = zmq.asyncio.Context()
         poller  = zmq.asyncio.Poller()
         
-        self.data_system = None
-        self.data_imu    = None
-        self.data_motion = None
-        self.data_fusion = None
+        self.data_system = icmSystemData()
+        self.data_imu    = icmIMUData()
+        self.data_motion = icmMotionData()
+        self.data_fusion = icmFusionData()
 
         socket = context.socket(zmq.SUB)
         socket.setsockopt(zmq.SUBSCRIBE, b"system")
         socket.setsockopt(zmq.SUBSCRIBE, b"imu")
         socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
         socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-        socket.connect(self.zmqportPUB)
+        socket.connect(self.zmqPortPUB)
         poller.register(socket, zmq.POLLIN)
 
-        self.logger.log(logging.INFO, 'IC20x  zmqWorker started on {}'.format(self.zmqportPUB))
+        self.logger.log(logging.INFO, 'IC20x  zmqWorker started on {}'.format(self.zmqPortPUB))
 
         while not self.finish_up:
             try:
@@ -351,7 +356,7 @@ class zmqWorkerICM():
                     socket.setsockopt(zmq.SUBSCRIBE, b"imu")
                     socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
                     socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-                    socket.connect(self.zmqportPUB)
+                    socket.connect(self.zmqPortPUB)
                     poller.register(socket, zmq.POLLIN)
                     self.new_system = \
                     self.new_imu    = \
@@ -378,7 +383,7 @@ class zmqWorkerICM():
                 socket.setsockopt(zmq.SUBSCRIBE, b"imu")
                 socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
                 socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-                socket.connect(self.zmqportPUB)
+                socket.connect(self.zmqPortPUB)
                 poller.register(socket, zmq.POLLIN)
                 self.new_system = \
                 self.new_imu    = \
@@ -390,8 +395,8 @@ class zmqWorkerICM():
         context.term()
         self.finished.set()
 
-    def set_zmqportPUB(self, port):
-        self.zmqportPUB = port
+    def set_zmqPortPUB(self, port):
+        self.zmqPortPUB = port
 
 #########################################################################################################
 # ICM 20649
@@ -407,8 +412,8 @@ class icm20x:
         self.fusion                     = args.fusion
         self.motion                     = args.motion
         self.report                     = args.report
-        self.zmqportPUB                 = args.zmqportPUB
-        self.zmqportREP                 = args.zmqportREP
+        self.zmqPortPUB                 = args.zmqPortPUB
+        self.zmqPortREP                 = args.zmqPortREP
         
         # Signals
         self.processedDataAvailable     = asyncio.Event()
@@ -646,7 +651,7 @@ class icm20x:
     # Sensor Loop
     ##############################################################################################
 
-    async def update_data(self):
+    async def sensor_loop(self):
         '''
         Check if Data available
         Obtain data from sensor
@@ -756,7 +761,7 @@ class icm20x:
     # icm Tasks
     ##############################################################################################
 
-    async def update_gyrOffset(self):
+    async def gyrOffset_loop(self):
         '''
         Save new Gyroscope Offset in Calibration File every minute if it has changed
         '''
@@ -775,7 +780,7 @@ class icm20x:
         self.logger.log(logging.INFO, 'Gyroscope Bias Saving Task stopped')
 
 
-    async def update_report(self):
+    async def report_loop(self):
         '''
         Report latest data
         Report fused data
@@ -814,7 +819,7 @@ class icm20x:
             if self.fusion:
                 msg_out+= 'Fusion  {:>10.6f}, {:>3d}/s\n'.format(self.fusion_deltaTime*1000.,  self.fusion_rate)
 
-            if self.zmqportPUB is not None:
+            if self.zmqPortPUB is not None:
                 msg_out+= 'ZMQ     {:>10.6f}, {:>3d}/s\n'.format(self.zmqPUB_deltaTime*1000.,  self.zmqPUB_rate)
             msg_out+= '-------------------------------------------------\n'
 
@@ -859,7 +864,7 @@ class icm20x:
 
         self.logger.log(logging.INFO, 'Reporting stopped')
 
-    async def update_zmqPUB(self):
+    async def zmqPUB_loop(self):
         '''
         Report data on ZMQ socket
         There are 4 data packets presented:
@@ -869,11 +874,11 @@ class icm20x:
          - motion if enabled
         '''
 
-        self.logger.log(logging.INFO, 'Creating ZMQ Publisher at \'tcp://*:{}\' ...'.format(self.zmqportPUB))
+        self.logger.log(logging.INFO, 'Creating ZMQ Publisher at \'tcp://*:{}\' ...'.format(self.zmqPortPUB))
 
         context = zmq.asyncio.Context()
         socket = context.socket(zmq.PUB)
-        socket.bind("tcp://*:{}".format(self.zmqportPUB))
+        socket.bind("tcp://*:{}".format(self.zmqPortPUB))
 
         data_system  = icmSystemData()
         data_imu     = icmIMUData()
@@ -946,7 +951,7 @@ class icm20x:
 
         self.logger.log(logging.INFO, 'ZMQ PUB finished')
 
-    async def update_zmqREP(self):
+    async def zmqREP_loop(self):
         '''
         Handle program control
         - fusion
@@ -955,18 +960,18 @@ class icm20x:
         - stop
         '''
 
-        self.logger.log(logging.INFO, 'Creating ZMQ Request/Reply at \'tcp://*:{}\' ...'.format(self.zmqportREP))
-
         context = zmq.asyncio.Context()
         socket  = context.socket(zmq.REP)
-        socket.bind("tcp://*:{}".format(self.zmqportREP))
+        socket.bind("tcp://*:{}".format(self.zmqPortREP))
 
         poller = zmq.asyncio.Poller()
         poller.register(socket, zmq.POLLIN)
 
+        self.logger.log(logging.INFO, 'Created ZMQ Request/Reply at \'tcp://*:{}\' ...'.format(self.zmqPortREP))
+
         while not self.finish_up:
 
-            startTime = time.perf_counter
+            startTime = time.perf_counter()
             
             try: 
                 events = dict(await poller.poll(timeout=-1))
@@ -1039,7 +1044,7 @@ class icm20x:
                 if task is not None:
                     task.cancel()
 
-    async def update_terminator(self, tasks):
+    async def terminator_loop(self, tasks):
         '''
         Wrapper for Task Termination
         Waits for termination signal and then executes the termination sequence
@@ -1063,38 +1068,39 @@ async def main(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     logger.log(logging.INFO, 'Starting ICM 20649 IMU ...')
 
+    tasks              = []    # frequently used tasks
+    terminator_tasks   = [] # slow tasks, long wait times
+
     # ICM IMU
     imu = icm20x(logger=logger, args=args)
 
     # Create all the async tasks
-    imu_task           = asyncio.create_task(imu.update_data())
-
-    tasks              = [imu_task]    # frequently used tasks
-    terminator_tasks   = [] # slow tasks, long wait times
+    imu_task           = asyncio.create_task(imu.sensor_loop())
+    tasks.append(imu_task)
 
     if args.fusion:
         # Saving the gyroscope offset
-        gyroffset_task = asyncio.create_task(imu.update_gyrOffset())
+        gyroffset_task = asyncio.create_task(imu.gyrOffset_loop())
         tasks.append(gyroffset_task)
         terminator_tasks.append(gyroffset_task)
 
     if args.report > 0:
         # Reporting to terminal
-        reporting_task = asyncio.create_task(imu.update_report())   # report new data, will not terminate
+        reporting_task = asyncio.create_task(imu.report_loop())   # report new data, will not terminate
         tasks.append(reporting_task)
 
-    if args.zmqportPUB is not None:
+    if args.zmqPortPUB is not None:
         # Provide ZMQ IMU data
-        zmq_task_pub   = asyncio.create_task(imu.update_zmqPUB())  # update zmq, will not terminate
+        zmq_task_pub   = asyncio.create_task(imu.zmqPUB_loop())  # update zmq, will not terminate
         tasks.append(zmq_task_pub)
 
-    if args.zmqportREP is not None:
+    if args.zmqPortREP is not None:
         # listen to external commands
-        zmq_task_rep   = asyncio.create_task(imu.update_zmqREP())  # update zmq, will not terminate
+        zmq_task_rep   = asyncio.create_task(imu.zmqREP_loop())  # update zmq, will not terminate
         tasks.append(zmq_task_rep)
 
     # Shut down tasks with long wait periods
-    terminator_task    = asyncio.create_task(imu.update_terminator(tasks=terminator_tasks)) # make sure we shutdown in timely fashion
+    terminator_task    = asyncio.create_task(imu.terminator_loop(tasks=terminator_tasks)) # make sure we shutdown in timely fashion
     tasks.append(terminator_task)
 
     # Set up a Control-C handler to gracefully stop the program
@@ -1153,9 +1159,9 @@ if __name__ == '__main__':
     parser.add_argument(
         '-zp',
         '--zmq_pub',
-        dest = 'zmqportPUB',
+        dest = 'zmqPortPUB',
         type = int,
-        metavar='<zmqportPUB>',
+        metavar='<zmqPortPUB>',
         help='port used by ZMQ, e.g. 5556',
         default =  5556
     )
@@ -1163,9 +1169,9 @@ if __name__ == '__main__':
     parser.add_argument(
         '-zr',
         '--zmq_rep',
-        dest = 'zmqportREP',
+        dest = 'zmqPortREP',
         type = int,
-        metavar='<zmqportREP>',
+        metavar='<zmqPortREP>',
         help='port used by ZMQ, e.g. 5555',
         default = 5555
     )
