@@ -7,7 +7,7 @@
 ################################################################
 
 # IMPORTS
-#########################################u#######################
+################################################################
 import math
 import logging
 import argparse
@@ -16,8 +16,9 @@ import asyncio
 import os
 import zmq
 import zmq.asyncio
+import msgpack
 
-from icm20649 import zmqWorkerICM
+from pyIMU.quaternion import Vector3D, Quaternion
 
 # Activate uvloop to speed up asyncio
 if os.name == 'nt':
@@ -34,6 +35,8 @@ TWOPI   = 2.0*math.pi
 
 report_updateInterval = 0.1
 
+ZMQTIMEOUT = 10000  # milli second, 10 secs
+
 async def handle_termination(zmq, logger, tasks):
     '''
     Cancel slow tasks based on provided list (speed up closing for program)
@@ -47,7 +50,259 @@ async def handle_termination(zmq, logger, tasks):
         for task in tasks:  # force task cancel if it still running
             if task is not None:
                 task.cancel()
-                
+
+def obj2dict(obj):
+    '''
+    encoding object variables to nested dict
+    '''
+    if isinstance(obj, dict):
+        return {k: obj2dict(v) for k, v in obj.items()}
+    elif hasattr(obj, '__dict__'):
+        return obj2dict(vars(obj))
+    elif isinstance(obj, list):
+        return [obj2dict(item) for item in obj]
+    else:
+        return obj
+
+class dict2obj:
+    '''
+    decoding nested dictionary to object
+    '''
+    def __init__(self, data):
+        for key, value in data.items():
+            if isinstance(value, dict):
+                setattr(self, key, dict2obj(value))
+            else:
+                setattr(self, key, value)
+
+###################################################################
+# Data Classes
+###################################################################
+
+class icmSystemData(object):
+    '''System relevant performance data'''
+    def __init__(self,  
+                 data_rate:      int = 0, 
+                 fusion_rate:    int = 0, 
+                 zmq_rate:       int = 0, 
+                 reporting_rate: int = 0) -> None:
+        self.data_rate       = data_rate
+        self.fusion_rate     = fusion_rate
+        self.zmq_rate        = zmq_rate
+        self.reporting_rate  = reporting_rate
+
+class icmIMUData(object):
+    '''IMU Data from the sensor'''
+    def __init__(self, 
+                 time: float=0.0,
+                 acc: Vector3D = Vector3D(0.,0.,0.),
+                 gyr: Vector3D = Vector3D(0.,0.,0.),
+                 mag: Vector3D = Vector3D(0.,0.,0.),
+                 moving: bool = True,
+                 magok: bool  = False) -> None:
+        self.time = time
+        self.acc  = acc
+        self.mag  = mag
+        self.gyr  = gyr
+        self.moving = moving
+        self.magok = magok
+
+class icmFusionData(object):
+    '''AHRS fusion data'''
+    def __init__(self, 
+                 time: float   = 0.,
+                 acc: Vector3D = Vector3D(0.,0.,0.),
+                 mag: Vector3D = Vector3D(0.,0.,0.),
+                 gyr: Vector3D = Vector3D(0.,0.,0.),
+                 rpy: Vector3D = Vector3D(0.,0.,0.),
+                 heading: float = 0.0,
+                 q: Quaternion = Quaternion(1.,0.,0.,0.)) -> None:
+        self.time           = time
+        self.acc            = acc
+        self.mag            = mag
+        self.gyr            = gyr
+        self.rpy            = rpy
+        self.heading        = heading
+        self.q              = q
+
+class icmMotionData(object):
+    '''Motion data'''
+    def __init__(self,
+                 time: float   = 0.,
+                 residuals:    Vector3D = Vector3D(0.,0.,0.),
+                 velocity:     Vector3D = Vector3D(0.,0.,0.),
+                 position:     Vector3D = Vector3D(0.,0.,0.),
+                 accBias:      Vector3D = Vector3D(0.,0.,0.),
+                 velocityBias: Vector3D = Vector3D(0.,0.,0.),
+                 dtmotion:     float = 0.0) -> None:
+            self.time         = time
+            self.residuals    = residuals
+            self.velocity     = velocity
+            self.position     = position
+            self.dtmotion     = dtmotion
+            self.accBias      = accBias
+            self.velocityBias = velocityBias
+
+##############################################################################################
+# ZMQ Worker 
+# listens to PUB from server
+##############################################################################################
+
+class zmqWorkerICM():
+
+    def __init__(self, logger, zmqPortPUB='tcp://localhost:5556'):
+
+        self.dataReady =  asyncio.Event()
+        self.finished  =  asyncio.Event()
+        self.dataReady.clear()
+        self.finished.clear()
+
+        self.logger     = logger
+        self.zmqPortPUB = zmqPortPUB
+
+        self.new_system = False
+        self.new_imu    = False
+        self.new_fusion = False
+        self.new_motion = False
+        self.timeout    = False
+
+        self.finish_up  = False
+        self.paused     = False
+
+        self.zmqTimeout = ZMQTIMEOUT
+
+        self.logger.log(logging.INFO, 'IC20x zmqWorker initialized')
+
+    async def start(self):
+
+        self.new_system = False
+        self.new_imu    = False
+        self.new_fusion = False
+        self.new_motion = False
+
+        context = zmq.asyncio.Context()
+        poller  = zmq.asyncio.Poller()
+        
+        self.data_system = icmSystemData()
+        self.data_imu    = icmIMUData()
+        self.data_motion = icmMotionData()
+        self.data_fusion = icmFusionData()
+
+        socket = context.socket(zmq.SUB)
+        socket.setsockopt(zmq.SUBSCRIBE, b"system")
+        socket.setsockopt(zmq.SUBSCRIBE, b"imu")
+        socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
+        socket.setsockopt(zmq.SUBSCRIBE, b"motion")
+        socket.connect(self.zmqPortPUB)
+        poller.register(socket, zmq.POLLIN)
+
+        self.logger.log(logging.INFO, 'IC20x  zmqWorker started on {}'.format(self.zmqPortPUB))
+
+        while not self.finish_up:
+            try:
+                events = dict(await poller.poll(timeout=self.zmqTimeout))
+                if socket in events and events[socket] == zmq.POLLIN:
+                    response = await socket.recv_multipart()
+                    if len(response) == 2:
+                        [topic, msg_packed] = response
+                        if topic == b"system":
+                            msg_dict = msgpack.unpackb(msg_packed)
+                            self.data_system = dict2obj(msg_dict)
+                            self.new_system = True
+                            self.logger.log(logging.INFO, 'IC20x zmqWorker received system data')
+                        elif topic == b"imu":
+                            msg_dict = msgpack.unpackb(msg_packed)
+                            self.data_imu = dict2obj(msg_dict)
+                            self.new_imu = True                            
+                            self.logger.log(logging.INFO, 'IC20x zmqWorker received imu data')
+                        elif topic == b"fusion":
+                            msg_dict = msgpack.unpackb(msg_packed)
+                            self.data_fusion = dict2obj(msg_dict)
+                            self.new_fusion = True
+                            self.logger.log(logging.INFO, 'IC20x zmqWorker received fusion data')
+                        elif topic == b"motion":
+                            msg_dict = msgpack.unpackb(msg_packed)
+                            self.data_motion = dict2obj(msg_dict)
+                            self.new_motion = True
+                            self.logger.log(logging.INFO, 'IC20x zmqWorker received motion data')
+                        else:
+                            self.logger.log(logging.INFO, 'IC20x zmqWorker topic {} not of interest. Dict: {}'.format(topic, msg_dict))
+                    else:
+                        self.logger.log(logging.ERROR, 'IC20x zmqWorker malformed message')
+                else:  # ZMQ TIMEOUT
+                    self.logger.log(logging.ERROR, 'IC20x zmqWorker timed out')
+                    poller.unregister(socket)
+                    socket.close()
+                    socket = context.socket(zmq.SUB)
+                    socket.setsockopt(zmq.SUBSCRIBE, b"system")
+                    socket.setsockopt(zmq.SUBSCRIBE, b"imu")
+                    socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
+                    socket.setsockopt(zmq.SUBSCRIBE, b"motion")
+                    socket.connect(self.zmqPortPUB)
+                    poller.register(socket, zmq.POLLIN)
+                    self.new_system = \
+                    self.new_imu    = \
+                    self.new_fusion = \
+                    self.new_motion = False
+
+
+                if (self.new_imu and self.new_system):
+                    if self.data_system.fusion:
+                        if self.new_fusion:
+                            if self.data_system.motion:
+                                if self.new_motion:
+                                    if not self.paused: self.dataReady.set()
+                                    self.logger.log(logging.INFO, 'IC20x zmqWorker imu, system, fusion and motion ready')
+                                    self.new_system  = \
+                                    self.new_imu     = \
+                                    self.new_fusion  = \
+                                    self.new_motion  = False
+                                else:
+                                    pass # just wait until we have motion data
+                            else:
+                                if not self.paused: self.dataReady.set()
+                                self.logger.log(logging.INFO, 'IC20x zmqWorker imu, system and fusion ready')
+                                self.new_system  = \
+                                self.new_imu     = \
+                                self.new_fusion  = False
+                        else:
+                            pass # just wait until we have fusion data
+                    else: 
+                        if not self.paused: self.dataReady.set()
+                        self.new_system  = \
+                        self.new_imu     = False
+                        self.logger.log(logging.INFO, 'IC20x zmqWorker imu and system ready')
+                else:
+                    pass # we need imu and system data, lets wiat for both
+                    # self.logger.log(logging.ERROR, 'IC20x zmqWorker no new data')
+
+            except:
+                self.logger.log(logging.ERROR, 'IC20x zmqWorker error')
+                poller.unregister(socket)
+                socket.close()
+                socket = context.socket(zmq.SUB)
+                socket.setsockopt(zmq.SUBSCRIBE, b"system")
+                socket.setsockopt(zmq.SUBSCRIBE, b"imu")
+                socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
+                socket.setsockopt(zmq.SUBSCRIBE, b"motion")
+                socket.connect(self.zmqPortPUB)
+                poller.register(socket, zmq.POLLIN)
+                self.new_system = \
+                self.new_imu    = \
+                self.new_fusion = \
+                self.new_motion = False
+
+            await asyncio.sleep(0) # allow other asyncio tasks to run
+
+        self.logger.log(logging.DEBUG, 'IC20x zmqWorker finished')
+        socket.close()
+        context.term()
+        self.finished.set()
+
+    def set_zmqPortPUB(self, port):
+        self.zmqPortPUB = port
+
+##############################################################################################
 # MAIN
 ##############################################################################################
 
@@ -67,7 +322,7 @@ async def main(args: argparse.Namespace):
     context = zmq.Context()
     socket = context.socket(zmq.REQ)
     socket.connect(args.zmqportREP)
-    socket.setsockopt(zmq.RCVTIMEO, 1000)
+    socket.setsockopt(zmq.RCVTIMEO, 10000)
 
     logger.log(logging.INFO, 'Turning on Fusion, Displaying Data')
 
@@ -106,7 +361,7 @@ async def main(args: argparse.Namespace):
     if not communicationError:
 
         # Lisen to sensors data server/publisher
-        zmqWorker =  zmqWorkerICM(logger=logger, zmqPortPUB=args.zmqPortPUB, parent=None)
+        zmqWorker =  zmqWorkerICM(logger=logger, zmqPortPUB=args.zmqPortPUB)
         imu_task = asyncio.create_task(zmqWorker.start())
         tasks = [imu_task]
 
@@ -120,7 +375,7 @@ async def main(args: argparse.Namespace):
         while True:
             reportTime = time.perf_counter()
 
-            zmqWorker.dataReady.wait()
+            await zmqWorker.dataReady.wait()
             zmqWorker.dataReady.clear()
             
             # Display the Data
@@ -186,7 +441,7 @@ if __name__ == '__main__':
         type = str,
         metavar='<zmqPortPUB>',
         help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5556\'',
-        default = 'tcp://localhost:5556'
+        default = 'tcp://board:5556'
     )
 
     parser.add_argument(
@@ -196,7 +451,7 @@ if __name__ == '__main__':
         type = str,
         metavar='<zmqportREP>',
         help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5555\'',
-        default = 'tcp://localhost:5555'
+        default = 'tcp://board:5555'
     )
 
     args = parser.parse_args()

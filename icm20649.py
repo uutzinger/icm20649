@@ -209,11 +209,15 @@ class icmSystemData(object):
                  data_rate:      int = 0, 
                  fusion_rate:    int = 0, 
                  zmq_rate:       int = 0, 
-                 reporting_rate: int = 0) -> None:
+                 reporting_rate: int = 0,
+                 fusion:         bool = False,
+                 motion:         bool = False) -> None:
         self.data_rate       = data_rate
         self.fusion_rate     = fusion_rate
         self.zmq_rate        = zmq_rate
         self.reporting_rate  = reporting_rate
+        self.fusion          = fusion          # are we fusing data?
+        self.motion          = motion          # are we computing motion?
 
 class icmIMUData(object):
     '''IMU Data from the sensor'''
@@ -266,139 +270,6 @@ class icmMotionData(object):
             self.dtmotion     = dtmotion
             self.accBias      = accBias
             self.velocityBias = velocityBias
-
-#########################################################################################################
-# ZMQ Data Receiver for ICM 20x
-# Primarily useful for 3rd party clients to communcate with this program
-#########################################################################################################
-
-class zmqWorkerICM():
-
-    def __init__(self, logger, zmqPortPUB='tcp://localhost:5556'):
-
-        self.dataReady =  asyncio.Event()
-        self.finished  =  asyncio.Event()
-
-        self.logger     = logger
-        self.zmqPortPUB = zmqPortPUB
-
-        self.new_system = False
-        self.new_imu    = False
-        self.new_fusion = False
-        self.new_motion = False
-        self.timeout    = False
-
-        self.finish_up  = False
-        self.paused     = False
-
-        self.zmqTimeout = ZMQTIMEOUT
-
-        self.logger.log(logging.INFO, 'IC20x zmqWorker initialized')
-
-    async def start(self):
-
-        self.new_system = False
-        self.new_imu    = False
-        self.new_fusion = False
-        self.new_motion = False
-
-        context = zmq.asyncio.Context()
-        poller  = zmq.asyncio.Poller()
-        
-        self.data_system = icmSystemData()
-        self.data_imu    = icmIMUData()
-        self.data_motion = icmMotionData()
-        self.data_fusion = icmFusionData()
-
-        socket = context.socket(zmq.SUB)
-        socket.setsockopt(zmq.SUBSCRIBE, b"system")
-        socket.setsockopt(zmq.SUBSCRIBE, b"imu")
-        socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
-        socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-        socket.connect(self.zmqPortPUB)
-        poller.register(socket, zmq.POLLIN)
-
-        self.logger.log(logging.INFO, 'IC20x  zmqWorker started on {}'.format(self.zmqPortPUB))
-
-        while not self.finish_up:
-            try:
-                events = dict(await poller.poll(timeout=self.zmqTimeout))
-                if socket in events and events[socket] == zmq.POLLIN:
-                    response = await socket.recv_multipart()
-                    if len(response) == 2:
-                        [topic, msg_packed] = response
-                        if topic == b"system":
-                            msg_dict = msgpack.unpackb(msg_packed)
-                            self.data_system = dict2obj(msg_dict)
-                            self.new_system = True
-                        elif topic == b"imu":
-                            msg_dict = msgpack.unpackb(msg_packed)
-                            self.data_imu = dict2obj(msg_dict)
-                            self.new_imu = True                            
-                        if topic == b"fusion":
-                            msg_dict = msgpack.unpackb(msg_packed)
-                            self.data_fusion = dict2obj(msg_dict)
-                            self.new_fusion = True
-                        elif topic == b"motion":
-                            msg_dict = msgpack.unpackb(msg_packed)
-                            self.data_motion = dict2obj(msg_dict)
-                            self.new_motion = True
-                        else:
-                            self.logger.log(
-                                logging.INFO, 'IC20x zmqWorker topic not of interest {}'.format(topic))
-                    else:
-                        self.logger.log(
-                            logging.ERROR, 'IC20x zmqWorker malformed message')
-                else:  # ZMQ TIMEOUT
-                    self.logger.log(logging.ERROR, 'IC20x zmqWorker timed out')
-                    poller.unregister(socket)
-                    socket.close()
-                    socket = context.socket(zmq.SUB)
-                    socket.setsockopt(zmq.SUBSCRIBE, b"system")
-                    socket.setsockopt(zmq.SUBSCRIBE, b"imu")
-                    socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
-                    socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-                    socket.connect(self.zmqPortPUB)
-                    poller.register(socket, zmq.POLLIN)
-                    self.new_system = \
-                    self.new_imu    = \
-                    self.new_fusion = \
-                    self.new_motion = False
-
-                if (self.new_imu or self.new_fusion or self.new_motion):
-                    if not self.paused:
-                        self.dataReady.set()
-                        self.new_system  = \
-                        self.new_imu     = \
-                        self.new_fusion  = \
-                        self.new_motion  = False
-                else:
-                    if not self.paused:
-                        pass
-
-            except:
-                self.logger.log(logging.ERROR, 'IC20x zmqWorker error')
-                poller.unregister(socket)
-                socket.close()
-                socket = context.socket(zmq.SUB)
-                socket.setsockopt(zmq.SUBSCRIBE, b"system")
-                socket.setsockopt(zmq.SUBSCRIBE, b"imu")
-                socket.setsockopt(zmq.SUBSCRIBE, b"fusion")
-                socket.setsockopt(zmq.SUBSCRIBE, b"motion")
-                socket.connect(self.zmqPortPUB)
-                poller.register(socket, zmq.POLLIN)
-                self.new_system = \
-                self.new_imu    = \
-                self.new_fusion = \
-                self.new_motion = False
-
-        self.logger.log(logging.DEBUG, 'IC20x zmqWorker finished')
-        socket.close()
-        context.term()
-        self.finished.set()
-
-    def set_zmqPortPUB(self, port):
-        self.zmqPortPUB = port
 
 #########################################################################################################
 # ICM 20649
@@ -801,69 +672,77 @@ class icm20x:
 
             startTime = time.perf_counter()
 
-            self.report_updateCounts += 1
-            if (startTime - self.report_lastTimeRate)>= 1.:
-                self.report_rate = copy(self.report_updateCounts)
-                self.report_lastTimeRate = time.perf_counter()
-                self.report_updateCounts = 0
+            if self.report > 0:
 
-            # Display the Data
-            msg_out = '\033[2J\n'
-            msg_out+= '-------------------------------------------------\n'
-            msg_out+= 'icm 20x: Moving:{}, Mag:{}\n'.format(
-                                                'Y' if self.moving else 'N',
-                                                'Y' if self.magok  else 'N')
-            msg_out+= '-------------------------------------------------\n'
-            msg_out+= 'Data    {:>10.6f}, {:>3d}/s\n'.format(self.data_deltaTime*1000.,        self.data_rate)
-            msg_out+= 'i2c polls until data {:d}\n'.format(self.i2cHits)
-            msg_out+= 'Report  {:>10.6f}, {:>3d}/s\n'.format(self.report_deltaTime*1000.,      self.report_rate)
+                self.report_updateCounts += 1
+                if (startTime - self.report_lastTimeRate)>= 1.:
+                    self.report_rate = copy(self.report_updateCounts)
+                    self.report_lastTimeRate = time.perf_counter()
+                    self.report_updateCounts = 0
 
-            if self.fusion:
-                msg_out+= 'Fusion  {:>10.6f}, {:>3d}/s\n'.format(self.fusion_deltaTime*1000.,  self.fusion_rate)
-
-            if self.zmqPortPUB is not None:
-                msg_out+= 'ZMQ     {:>10.6f}, {:>3d}/s\n'.format(self.zmqPUB_deltaTime*1000.,  self.zmqPUB_rate)
-            msg_out+= '-------------------------------------------------\n'
-
-            if self.report > 1:
-                msg_out+= 'Time  {:>10.6f}, dt {:>10.6f}\n'.format(self.sensorTime, self.delta_sensorTime)
-                msg_out+= 'Accel     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc.x,self.acc.y,self.acc.z,self.acc.norm)
-                msg_out+= 'Gyro      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.gyr.x,self.gyr.y,self.gyr.z,self.gyr.norm)
-                msg_out+= 'Magno     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.mag.x,self.mag.y,self.mag.z,self.mag.norm)
-                msg_out+= 'Accel avg {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc_average.x, self.acc_average.y, self.acc_average.z, self.acc_average.norm)
-                msg_out+= 'Gyro  avg {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_average.x, self.gyr_average.y, self.gyr_average.z, self.gyr_average.norm*60./TWOPI)
-                msg_out+= 'Gyro bias {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_offset.x, self.gyr_offset.y, self.gyr_offset.z, self.gyr_offset.norm*60./TWOPI)
+                # Display the Data
+                msg_out = '\033[2J\n'
                 msg_out+= '-------------------------------------------------\n'
+                msg_out+= 'icm 20x: Moving:{}, Mag:{}\n'.format(
+                                                    'Y' if self.moving else 'N',
+                                                    'Y' if self.magok  else 'N')
+                msg_out+= '-------------------------------------------------\n'
+                msg_out+= 'Data    {:>10.6f}, {:>3d}/s\n'.format(self.data_deltaTime*1000.,        self.data_rate)
+                msg_out+= 'i2c polls until data {:d}\n'.format(self.i2cHits)
+                msg_out+= 'Report  {:>10.6f}, {:>3d}/s\n'.format(self.report_deltaTime*1000.,      self.report_rate)
 
                 if self.fusion:
-                    msg_out+= 'Acc     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc_cal.x,self.acc_cal.y,self.acc_cal.z,self.acc_cal.norm)
-                    msg_out+= 'Gyr     {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_cal.x,self.gyr_cal.y,self.gyr_cal.z,self.gyr_cal.norm*60./TWOPI)
-                    msg_out+= 'Mag     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.mag_cal.x,self.mag_cal.y,self.mag_cal.z,self.mag_cal.norm)
-                    msg_out+= 'Euler: R{:>6.1f} P{:>6.1f} Y{:>6.1f}, Heading {:>4.0f}\n'.format(
-                                                    self.rpy.x*RAD2DEG, self.rpy.y*RAD2DEG, self.rpy.z*RAD2DEG, 
-                                                    self.heading*RAD2DEG)
-                    msg_out+= 'Q:     W{:>6.3f} X{:>6.3f} Y{:>6.3f} Z{:>6.3f}\n'.format(
-                                                    self.q.w, self.q.x, self.q.y, self.q.z)
+                    msg_out+= 'Fusion  {:>10.6f}, {:>3d}/s\n'.format(self.fusion_deltaTime*1000.,  self.fusion_rate)
 
-                if self.motion:
+                if self.zmqPortPUB is not None:
+                    msg_out+= 'ZMQ     {:>10.6f}, {:>3d}/s\n'.format(self.zmqPUB_deltaTime*1000.,  self.zmqPUB_rate)
+
+                msg_out+= '-------------------------------------------------\n'
+
+                if self.report > 1:
+                    msg_out+= 'Time  {:>10.6f}, dt {:>10.6f}\n'.format(self.sensorTime, self.delta_sensorTime)
+                    msg_out+= 'Accel     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc.x,self.acc.y,self.acc.z,self.acc.norm)
+                    msg_out+= 'Gyro      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.gyr.x,self.gyr.y,self.gyr.z,self.gyr.norm)
+                    msg_out+= 'Magno     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.mag.x,self.mag.y,self.mag.z,self.mag.norm)
+                    msg_out+= 'Accel avg {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc_average.x, self.acc_average.y, self.acc_average.z, self.acc_average.norm)
+                    msg_out+= 'Gyro  avg {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_average.x, self.gyr_average.y, self.gyr_average.z, self.gyr_average.norm*60./TWOPI)
+                    msg_out+= 'Gyro bias {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_offset.x, self.gyr_offset.y, self.gyr_offset.z, self.gyr_offset.norm*60./TWOPI)
                     msg_out+= '-------------------------------------------------\n'
-                    msg_out+= 'Residual {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.residuals.x,self.residuals.y,self.residuals.z,self.residuals.norm)
-                    msg_out+= 'Vel      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.velocity.x,self.velocity.y,self.velocity.z,self.velocity.norm)
-                    msg_out+= 'Pos      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.position.x,self.position.y,self.position.z,self.position.norm)
-                    msg_out+= 'Vel Bias {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.velocityBias.x,self.velocityBias.y,self.velocityBias.z,self.velocityBias.norm)
-                    msg_out+= 'Acc Bias {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.accBias.x,self.accBias.y,self.accBias.z,self.accBias.norm)
-                    msg_out+= 'dt       {:>10.6f} s {:>10.6f} ms\n'.format(self.dtmotion, self.dt*1000.)
 
-            print(msg_out, flush=True)
+                    if self.fusion:
+                        msg_out+= 'Acc     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.acc_cal.x,self.acc_cal.y,self.acc_cal.z,self.acc_cal.norm)
+                        msg_out+= 'Gyr     {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(self.gyr_cal.x,self.gyr_cal.y,self.gyr_cal.z,self.gyr_cal.norm*60./TWOPI)
+                        msg_out+= 'Mag     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.mag_cal.x,self.mag_cal.y,self.mag_cal.z,self.mag_cal.norm)
+                        msg_out+= 'Euler: R{:>6.1f} P{:>6.1f} Y{:>6.1f}, Heading {:>4.0f}\n'.format(
+                                                        self.rpy.x*RAD2DEG, self.rpy.y*RAD2DEG, self.rpy.z*RAD2DEG, 
+                                                        self.heading*RAD2DEG)
+                        msg_out+= 'Q:     W{:>6.3f} X{:>6.3f} Y{:>6.3f} Z{:>6.3f}\n'.format(
+                                                        self.q.w, self.q.x, self.q.y, self.q.z)
 
-            self.report_deltaTime = time.perf_counter() - startTime
+                    if self.motion:
+                        msg_out+= '-------------------------------------------------\n'
+                        msg_out+= 'Residual {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.residuals.x,self.residuals.y,self.residuals.z,self.residuals.norm)
+                        msg_out+= 'Vel      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.velocity.x,self.velocity.y,self.velocity.z,self.velocity.norm)
+                        msg_out+= 'Pos      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.position.x,self.position.y,self.position.z,self.position.norm)
+                        msg_out+= 'Vel Bias {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.velocityBias.x,self.velocityBias.y,self.velocityBias.z,self.velocityBias.norm)
+                        msg_out+= 'Acc Bias {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(self.accBias.x,self.accBias.y,self.accBias.z,self.accBias.norm)
+                        msg_out+= 'dt       {:>10.6f} s {:>10.6f} ms\n'.format(self.dtmotion, self.dt*1000.)
 
-            # Wait to next interval time
-            sleepTime = self.report_updateInterval - (self.report_deltaTime)
-            await asyncio.sleep(max(0.,sleepTime))
-            timingError = time.perf_counter() - startTime - self.report_updateInterval
-            self.report_updateInterval = max(0., REPORTINTERVAL - timingError)
+                print(msg_out, flush=True)
 
+                self.report_deltaTime = time.perf_counter() - startTime
+
+                # Wait to next interval time
+                sleepTime = self.report_updateInterval - (self.report_deltaTime)
+                await asyncio.sleep(max(0.,sleepTime))
+                timingError = time.perf_counter() - startTime - self.report_updateInterval
+                self.report_updateInterval = max(0., REPORTINTERVAL - timingError)
+
+            else: 
+
+                # check every second if reporting had been turned on
+                await asyncio.sleep(1.0)
+    
         self.logger.log(logging.INFO, 'Reporting stopped')
 
     async def zmqPUB_loop(self):
@@ -919,6 +798,8 @@ class icm20x:
             data_system.fusion_rate    = self.fusion_rate
             data_system.zmq_rate       = self.zmqPUB_rate
             data_system.reporting_rate = self.report_rate
+            data_system.fusion         = self.fusion
+            data_system.motion         = self.motion
             system_msgpack = msgpack.packb(obj2dict(vars(data_system)))
             socket.send_multipart([b"system", system_msgpack])
 
@@ -983,10 +864,10 @@ class icm20x:
                         [topic, value] = response
                         if topic == b"motion":
                             if value == b"\x01":
-                                self.motion = True
+                                self.motion = \
                                 self.fusion = True
                             else:
-                                self.motion = False
+                                self.motion = \
                                 self.fusion = False
                             socket.send_string("OK")
                             self.logger.log(logging.INFO, 'ZMQ motion received: {}'.format(value))
@@ -1022,17 +903,16 @@ class icm20x:
                 socket = context.socket(zmq.REP)
                 socket.bind("tcp://*:{}".format(self.zmqPortREP))
                 poller.register(socket, zmq.POLLIN)
+            
+            await asyncio.sleep(0)
                 
             # update interval
             self.zmqREP_deltaTime = time.perf_counter() - startTime
-
-            await asyncio.sleep(0)
 
         self.logger.log(logging.INFO, 'ZMQ REQ/REP finished')
         socket.close()
         context.term()
         
-
     async def handle_termination(self, tasks):
         '''
         Cancel slow tasks based on provided list (speed up closing for program)
@@ -1080,26 +960,22 @@ async def main(args: argparse.Namespace):
     imu_task           = asyncio.create_task(imu.sensor_loop())
     tasks.append(imu_task)
 
-    if args.fusion:
-        # Saving the gyroscope offset
-        gyroffset_task = asyncio.create_task(imu.gyrOffset_loop())
-        tasks.append(gyroffset_task)
-        terminator_tasks.append(gyroffset_task)
+    # Saving the gyroscope offset
+    gyroffset_task = asyncio.create_task(imu.gyrOffset_loop())
+    tasks.append(gyroffset_task)
+    terminator_tasks.append(gyroffset_task)
 
-    if args.report > 0:
-        # Reporting to terminal
-        reporting_task = asyncio.create_task(imu.report_loop())   # report new data, will not terminate
-        tasks.append(reporting_task)
+    # Reporting to terminal
+    reporting_task = asyncio.create_task(imu.report_loop())   # report new data, will not terminate
+    tasks.append(reporting_task)
 
-    if args.zmqPortPUB is not None:
-        # Provide ZMQ IMU data
-        zmq_task_pub   = asyncio.create_task(imu.zmqPUB_loop())  # update zmq, will not terminate
-        tasks.append(zmq_task_pub)
+    # Provide ZMQ IMU data
+    zmq_task_pub   = asyncio.create_task(imu.zmqPUB_loop())  # update zmq, will not terminate
+    tasks.append(zmq_task_pub)
 
-    if args.zmqPortREP is not None:
-        # listen to external commands
-        zmq_task_rep   = asyncio.create_task(imu.zmqREP_loop())  # update zmq, will not terminate
-        tasks.append(zmq_task_rep)
+    # listen to external commands
+    zmq_task_rep   = asyncio.create_task(imu.zmqREP_loop())  # update zmq, will not terminate
+    tasks.append(zmq_task_rep)
 
     # Shut down tasks with long wait periods
     terminator_task    = asyncio.create_task(imu.terminator_loop(tasks=terminator_tasks)) # make sure we shutdown in timely fashion
