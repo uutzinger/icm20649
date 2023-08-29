@@ -209,24 +209,25 @@ class zmqWorkerICM():
                             msg_dict = msgpack.unpackb(msg_packed)
                             self.data_system = dict2obj(msg_dict)
                             self.new_system = True
-                            self.logger.log(logging.INFO, 'IC20x zmqWorker received system data')
+                            # self.logger.log(logging.INFO, 'IC20x zmqWorker received system data')
                         elif topic == b"imu":
                             msg_dict = msgpack.unpackb(msg_packed)
                             self.data_imu = dict2obj(msg_dict)
                             self.new_imu = True                            
-                            self.logger.log(logging.INFO, 'IC20x zmqWorker received imu data')
+                            # self.logger.log(logging.INFO, 'IC20x zmqWorker received imu data')
                         elif topic == b"fusion":
                             msg_dict = msgpack.unpackb(msg_packed)
                             self.data_fusion = dict2obj(msg_dict)
                             self.new_fusion = True
-                            self.logger.log(logging.INFO, 'IC20x zmqWorker received fusion data')
+                            # self.logger.log(logging.INFO, 'IC20x zmqWorker received fusion data')
                         elif topic == b"motion":
                             msg_dict = msgpack.unpackb(msg_packed)
                             self.data_motion = dict2obj(msg_dict)
                             self.new_motion = True
-                            self.logger.log(logging.INFO, 'IC20x zmqWorker received motion data')
+                            # self.logger.log(logging.INFO, 'IC20x zmqWorker received motion data')
                         else:
-                            self.logger.log(logging.INFO, 'IC20x zmqWorker topic {} not of interest. Dict: {}'.format(topic, msg_dict))
+                            pass
+                            # self.logger.log(logging.INFO, 'IC20x zmqWorker topic {} not of interest. Dict: {}'.format(topic, msg_dict))
                     else:
                         self.logger.log(logging.ERROR, 'IC20x zmqWorker malformed message')
                 else:  # ZMQ TIMEOUT
@@ -252,7 +253,7 @@ class zmqWorkerICM():
                             if self.data_system.motion:
                                 if self.new_motion:
                                     if not self.paused: self.dataReady.set()
-                                    self.logger.log(logging.INFO, 'IC20x zmqWorker imu, system, fusion and motion ready')
+                                    # self.logger.log(logging.INFO, 'IC20x zmqWorker imu, system, fusion and motion ready')
                                     self.new_system  = \
                                     self.new_imu     = \
                                     self.new_fusion  = \
@@ -261,7 +262,7 @@ class zmqWorkerICM():
                                     pass # just wait until we have motion data
                             else:
                                 if not self.paused: self.dataReady.set()
-                                self.logger.log(logging.INFO, 'IC20x zmqWorker imu, system and fusion ready')
+                                # self.logger.log(logging.INFO, 'IC20x zmqWorker imu, system and fusion ready')
                                 self.new_system  = \
                                 self.new_imu     = \
                                 self.new_fusion  = False
@@ -271,7 +272,7 @@ class zmqWorkerICM():
                         if not self.paused: self.dataReady.set()
                         self.new_system  = \
                         self.new_imu     = False
-                        self.logger.log(logging.INFO, 'IC20x zmqWorker imu and system ready')
+                        # self.logger.log(logging.INFO, 'IC20x zmqWorker imu and system ready')
                 else:
                     pass # we need imu and system data, lets wiat for both
                     # self.logger.log(logging.ERROR, 'IC20x zmqWorker no new data')
@@ -305,7 +306,9 @@ class zmqWorkerICM():
 ##############################################################################################
 # MAIN
 ##############################################################################################
-
+def norm(v: Vector3D) -> float:
+    return math.sqrt(v.x*v.x+v.y*v.y+v.z*v.z)
+    
 async def main(args: argparse.Namespace):
 
     # Setup logging
@@ -390,30 +393,29 @@ async def main(args: argparse.Namespace):
             msg_out+= 'Fusion  {:>3d}/s\n'.format(zmqWorker.data_system.fusion_rate)
             msg_out+= 'ZMQ     {:>3d}/s\n'.format(zmqWorker.data_system.zmq_rate)
             msg_out+= '-------------------------------------------------\n'
-            msg_out+= 'Time  {:>10.6f}}\n'.format(zmqWorker.data_imu.time)
-            msg_out+= 'Accel   {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_imu.acc.x,zmqWorker.data_imu.acc.y,zmqWorker.data_imu.acc.z,zmqWorker.data_imu.acc.norm)
-            msg_out+= 'Gyro    {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_imu.gyr.x,zmqWorker.data_imu.gyr.y,zmqWorker.data_imu.gyr.z,zmqWorker.data_imu.gyr.norm)
-            msg_out+= 'Mag     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_imu.mag.x,zmqWorker.data_imu.mag.y,zmqWorker.data_imu.mag.z,zmqWorker.data_imu.mag.norm)
+            msg_out+= 'Time  {:>10.6f}\n'.format(zmqWorker.data_imu.time)
+            msg_out+= 'Accel   {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_imu.acc.x,zmqWorker.data_imu.acc.y,zmqWorker.data_imu.acc.z,norm(zmqWorker.data_imu.acc))
+            msg_out+= 'Gyro    {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_imu.gyr.x,zmqWorker.data_imu.gyr.y,zmqWorker.data_imu.gyr.z,norm(zmqWorker.data_imu.gyr))
+            msg_out+= 'Mag     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_imu.mag.x,zmqWorker.data_imu.mag.y,zmqWorker.data_imu.mag.z,norm(zmqWorker.data_imu.mag))
             msg_out+= '-------------------------------------------------\n'
-
-            msg_out+= 'Acc     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_fusion.acc.x,zmqWorker.data_fusion.acc.y,zmqWorker.data_fusion.acc.z,zmqWorker.data_fusion.acc.norm)
-            msg_out+= 'Gyr     {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(zmqWorker.data_fusion.gyr.x,zmqWorker.data_fusion.gyr.y,zmqWorker.data_fusion.gyr.z,zmqWorker.data_fusion.gyr.norm*60./TWOPI)
-            msg_out+= 'Mag     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_fusion.mag.x,zmqWorker.data_fusion.mag.y,zmqWorker.data_fusion.mag.z,zmqWorker.data_fusion.mag.norm)
+            msg_out+= 'Acc     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_fusion.acc.x,zmqWorker.data_fusion.acc.y,zmqWorker.data_fusion.acc.z,norm(zmqWorker.data_fusion.acc))
+            msg_out+= 'Gyr     {:>8.3f} {:>8.3f} {:>8.3f} RPM:{:>8.3f}\n'.format(zmqWorker.data_fusion.gyr.x,zmqWorker.data_fusion.gyr.y,zmqWorker.data_fusion.gyr.z,norm(zmqWorker.data_fusion.gyr)*60./TWOPI)
+            msg_out+= 'Mag     {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_fusion.mag.x,zmqWorker.data_fusion.mag.y,zmqWorker.data_fusion.mag.z,norm(zmqWorker.data_fusion.mag))
             msg_out+= 'Euler: R{:>6.1f} P{:>6.1f} Y{:>6.1f}, Heading {:>4.0f}\n'.format(
                                             zmqWorker.data_fusion.rpy.x*RAD2DEG, zmqWorker.data_fusion.rpy.y*RAD2DEG, zmqWorker.data_fusion.rpy.z*RAD2DEG, 
                                             zmqWorker.data_fusion.heading*RAD2DEG)
             msg_out+= 'Q:     W{:>6.3f} X{:>6.3f} Y{:>6.3f} Z{:>6.3f}\n'.format(
                                             zmqWorker.data_fusion.q.w, zmqWorker.data_fusion.q.x, zmqWorker.data_fusion.q.y, zmqWorker.data_fusion.q.z)
             msg_out+= '-------------------------------------------------\n'
-            msg_out+= 'Residual {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.residuals.x,zmqWorker.data_motion.residuals.y,zmqWorker.data_motion.residuals.z,zmqWorker.data_motion.residuals.norm)
-            msg_out+= 'Vel      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.velocity.x,zmqWorker.data_motion.velocity.y,zmqWorker.data_motion.velocity.z,zmqWorker.data_motion.velocity.norm)
-            msg_out+= 'Pos      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.position.x,zmqWorker.data_motion.position.y,zmqWorker.data_motion.position.z,zmqWorker.data_motion.position.norm)
-            msg_out+= 'Vel Bias {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.velocityBias.x,zmqWorker.data_motion.velocityBias.y,zmqWorker.data_motion.velocityBias.z,zmqWorker.data_motion.velocityBias.norm)
-            msg_out+= 'Acc Bias {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.accBias.x,zmqWorker.data_motion.accBias.y,zmqWorker.data_motion.accBias.z,zmqWorker.data_motion.accBias.norm)
+
+            msg_out+= 'Residual {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.residuals.x,zmqWorker.data_motion.residuals.y,zmqWorker.data_motion.residuals.z,norm(zmqWorker.data_motion.residuals))
+            msg_out+= 'Vel      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.velocity.x,zmqWorker.data_motion.velocity.y,zmqWorker.data_motion.velocity.z,norm(zmqWorker.data_motion.velocity))
+            msg_out+= 'Pos      {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.position.x,zmqWorker.data_motion.position.y,zmqWorker.data_motion.position.z,norm(zmqWorker.data_motion.position))
+            msg_out+= 'Vel Bias {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.velocityBias.x,zmqWorker.data_motion.velocityBias.y,zmqWorker.data_motion.velocityBias.z,norm(zmqWorker.data_motion.velocityBias))
+            msg_out+= 'Acc Bias {:>8.3f} {:>8.3f} {:>8.3f} N:  {:>8.3f}\n'.format(zmqWorker.data_motion.accBias.x,zmqWorker.data_motion.accBias.y,zmqWorker.data_motion.accBias.z,norm(zmqWorker.data_motion.accBias))
             msg_out+= 'dt       {:>10.6f} s\n'.format(zmqWorker.data_motion.dtmotion)
 
             print(msg_out, flush=True)
-
 
             sleepTime = report_updateInterval - (time.perf_counter() - reportTime)
             time.sleep(max(0.,sleepTime))
@@ -441,7 +443,7 @@ if __name__ == '__main__':
         type = str,
         metavar='<zmqPortPUB>',
         help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5556\'',
-        default = 'tcp://board:5556'
+        default = 'tcp://localhost:5556'
     )
 
     parser.add_argument(
@@ -451,7 +453,7 @@ if __name__ == '__main__':
         type = str,
         metavar='<zmqportREP>',
         help='port used by ZMQ, e.g. \'tcp://10.0.0.2:5555\'',
-        default = 'tcp://board:5555'
+        default = 'tcp://localhost:5555'
     )
 
     args = parser.parse_args()
